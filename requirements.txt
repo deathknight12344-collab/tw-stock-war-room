@@ -1,0 +1,8 @@
+streamlit
+gradio
+yfinance
+pandas
+numpy
+pytz
+requests
+urllib3
