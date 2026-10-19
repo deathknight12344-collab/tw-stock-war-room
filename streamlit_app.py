@@ -6,6 +6,7 @@ import datetime
 import pytz
 import requests
 import urllib3
+import io
 
 # 關閉 SSL 憑證警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -51,11 +52,11 @@ def get_volume_multiplier():
     return mult_clean, f"盤中即時推估 (U型倍率 {mult_clean:.2f}x)"
 
 # ==========================================
-# 模組 2：證交所/櫃買中心 OpenAPI 與集保大戶、月營收直連
+# 模組 2：證交所/櫃買中心/集保中心 OpenAPI 直連引擎
 # ==========================================
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_official_market_data():
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     price_dict = {}
     tdcc_dict = {}
     rev_dict = {}
@@ -80,7 +81,7 @@ def fetch_official_market_data():
     except Exception:
         pass
 
-    # 1. 證交所全市場日收盤行情 (STOCK_DAY_ALL，包含 0050 與 00631L)
+    # 1. 證交所全市場日收盤行情 (STOCK_DAY_ALL)
     try:
         r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10, verify=False)
         if r.status_code == 200:
@@ -136,41 +137,72 @@ def fetch_official_market_data():
     except Exception:
         pass
 
-    # 3. TDCC 集保 400 張以上大戶比例（嚴格過濾級距 12~15，排除級距 16 合計項）
+    # 3. TDCC 集保 400 張以上大戶比例（優先抓取 TDCC 官方上市櫃 CSV 總表，再以證交所 JSON 備援）
+    # 嚴格過濾級距 12, 13, 14, 15 (排除級距 16 合計列與差異列)
     try:
-        r_tdcc = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap11_L", headers=headers, timeout=10, verify=False)
-        if r_tdcc.status_code == 200:
-            temp_tdcc = {}
-            for row in r_tdcc.json():
-                code = str(row.get("證券代號", row.get("公司代號", ""))).strip()
-                lvl = str(row.get("持股分級", "")).strip()
-                pct_str = str(row.get("占集保庫存數比例(%)", row.get("佔集保庫存數比例(%)", "0"))).replace(",", "")
-                if lvl in ["12", "13", "14", "15"]:
-                    try:
-                        temp_tdcc[code] = temp_tdcc.get(code, 0.0) + float(pct_str)
-                    except Exception:
-                        pass
-            for k, v in temp_tdcc.items():
-                if 0 < v <= 100.0:
-                    tdcc_dict[k] = round(v, 1)
+        r_csv = requests.get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", headers=headers, timeout=15, verify=False)
+        if r_csv.status_code == 200 and len(r_csv.text) > 500:
+            df_tdcc = pd.read_csv(io.StringIO(r_csv.text), dtype=str)
+            df_tdcc.columns = [c.strip() for c in df_tdcc.columns]
+            col_code = next((c for c in df_tdcc.columns if "代號" in c), None)
+            col_lvl = next((c for c in df_tdcc.columns if "分級" in c), None)
+            col_pct = next((c for c in df_tdcc.columns if "比例" in c), None)
+            if col_code and col_lvl and col_pct:
+                df_tdcc[col_code] = df_tdcc[col_code].str.strip()
+                df_tdcc[col_lvl] = df_tdcc[col_lvl].str.strip()
+                df_sub = df_tdcc[df_tdcc[col_lvl].isin(["12", "13", "14", "15"])].copy()
+                df_sub["pct_num"] = pd.to_numeric(df_sub[col_pct].str.replace(",", ""), errors="coerce").fillna(0.0)
+                grouped = df_sub.groupby(col_code)["pct_num"].sum()
+                for k, v in grouped.items():
+                    if 0 < v <= 100.0:
+                        tdcc_dict[str(k)] = round(float(v), 1)
     except Exception:
         pass
 
-    # 4. 上市櫃最新月營收 YoY (%)
+    if not tdcc_dict:
+        try:
+            r_tdcc = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap11_L", headers=headers, timeout=15, verify=False)
+            if r_tdcc.status_code == 200:
+                temp_tdcc = {}
+                for row in r_tdcc.json():
+                    code = str(row.get("證券代號", row.get("公司代號", ""))).strip()
+                    lvl = str(row.get("持股分級", "")).strip()
+                    pct_val = "0"
+                    for k_name, v_val in row.items():
+                        if "比例" in k_name:
+                            pct_val = str(v_val).replace(",", "").strip()
+                            break
+                    if lvl in ["12", "13", "14", "15"]:
+                        try:
+                            temp_tdcc[code] = temp_tdcc.get(code, 0.0) + float(pct_val)
+                        except Exception:
+                            pass
+                for k, v in temp_tdcc.items():
+                    if 0 < v <= 100.0:
+                        tdcc_dict[k] = round(v, 1)
+        except Exception:
+            pass
+
+    # 4. 上市櫃最新月營收 YoY (%)（自動識別「營業收入-去年同月增減(%)」等欄位名稱）
     for url in [
         "https://openapi.twse.com.tw/v1/opendata/t187ap05_L",
         "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
     ]:
         try:
-            r_rev = requests.get(url, headers=headers, timeout=10, verify=False)
+            r_rev = requests.get(url, headers=headers, timeout=12, verify=False)
             if r_rev.status_code == 200:
                 for row in r_rev.json():
-                    code = str(row.get("公司代號", "")).strip()
-                    yoy_str = str(row.get("去年同月增減(%)", "0")).replace(",", "").strip()
-                    try:
-                        rev_dict[code] = round(float(yoy_str), 1)
-                    except Exception:
-                        pass
+                    code = str(row.get("公司代號", row.get("證券代號", ""))).strip()
+                    yoy_raw = None
+                    for k_name, v_val in row.items():
+                        if "去年同月增減" in k_name or "同月增減" in k_name:
+                            yoy_raw = str(v_val).replace(",", "").strip()
+                            break
+                    if code and yoy_raw not in [None, "", "-", "--", "N/A"]:
+                        try:
+                            rev_dict[code] = round(float(yoy_raw), 1)
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -205,7 +237,7 @@ CORE_WATCHLIST = {
 }
 
 # ==========================================
-# 模組 4：技術指標演算核心
+# 模組 4：技術指標與動態防禦城堡演算核心
 # ==========================================
 def compute_kd(highs, lows, closes, n=9):
     k_val, d_val = 50.0, 50.0
@@ -232,7 +264,6 @@ def fetch_and_analyze_fleet():
     price_dict, _, _, twii_official = fetch_official_market_data()
     tickers = ["^TWII", "00631L.TW", "0050.TW"]
     
-    # 預設保底值，若 yfinance 成功則自動覆蓋為真實 K 線計算值
     twii_now = twii_official["close"] if twii_official["close"] > 0 else 23000.0
     twii_chg_pct = twii_official["chg_pct"]
     ma20 = round(twii_now * 0.985, 1)
@@ -243,9 +274,9 @@ def fetch_and_analyze_fleet():
     k9, d9, macd_hist = 60.0, 55.0, 15.0
     date_str = get_tw_now().strftime("%Y-%m-%d")
 
-    p_2x = price_dict.get("00631L", {}).get("close", 230.0)
+    p_2x = price_dict.get("00631L", {}).get("close", 37.15)
     p_2x_chg = price_dict.get("00631L", {}).get("chg_pct", 0.0)
-    p_1x = price_dict.get("0050", {}).get("close", 190.0)
+    p_1x = price_dict.get("0050", {}).get("close", 109.0)
     p_1x_chg = price_dict.get("0050", {}).get("chg_pct", 0.0)
 
     try:
@@ -256,8 +287,6 @@ def fetch_and_analyze_fleet():
                 c_twii = df_twii["Close"].values.astype(float)
                 h_twii = df_twii["High"].values.astype(float)
                 l_twii = df_twii["Low"].values.astype(float)
-                if twii_official["close"] > 0:
-                    c_twii[-1] = twii_official["close"]
                 twii_now = round(float(c_twii[-1]), 1)
                 twii_prev = float(c_twii[-2]) if len(c_twii) > 1 else twii_now
                 twii_chg_pct = round((twii_now - twii_prev) / twii_prev * 100, 2)
@@ -273,13 +302,13 @@ def fetch_and_analyze_fleet():
                 date_str = df_twii.index[-1].strftime("%Y-%m-%d")
 
             df_2x = data["00631L.TW"].dropna(subset=["Close"])
-            if len(df_2x) >= 2 and "00631L" not in price_dict:
+            if len(df_2x) >= 2:
                 p_2x = round(float(df_2x["Close"].values[-1]), 2)
                 p_2x_prev = float(df_2x["Close"].values[-2])
                 p_2x_chg = round((p_2x - p_2x_prev) / p_2x_prev * 100, 2)
 
             df_1x = data["0050.TW"].dropna(subset=["Close"])
-            if len(df_1x) >= 2 and "0050" not in price_dict:
+            if len(df_1x) >= 2:
                 p_1x = round(float(df_1x["Close"].values[-1]), 2)
                 p_1x_prev = float(df_1x["Close"].values[-2])
                 p_1x_chg = round((p_1x - p_1x_prev) / p_1x_prev * 100, 2)
@@ -300,7 +329,7 @@ def fetch_and_analyze_fleet():
         "date_str": date_str
     }
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def scan_all_stocks():
     price_dict, tdcc_dict, rev_dict, _ = fetch_official_market_data()
     vol_mult, vol_note = get_volume_multiplier()
@@ -341,11 +370,6 @@ def scan_all_stocks():
             v = (df_s["Volume"].values.astype(float) / 1000.0)
 
             name, sector, _ = candidates[code]
-            if code in price_dict:
-                c[-1] = price_dict[code]["close"]
-                if price_dict[code]["vol_lots"] > 0:
-                    v[-1] = price_dict[code]["vol_lots"]
-
             curr_p = round(float(c[-1]), 2)
             prev_p = float(c[-2])
             chg_1d = round((curr_p - prev_p) / prev_p * 100, 2) if prev_p > 0 else 0.0
@@ -362,6 +386,7 @@ def scan_all_stocks():
             ma10 = round(float(np.mean(c[-10:])), 2)
             ma20 = round(float(np.mean(c[-20:])), 2)
             ma60 = round(float(np.mean(c[-60:])), 2)
+            ma120 = round(float(np.mean(c[-120:])), 2) if len(c) >= 120 else ma60
 
             std20 = float(np.std(c[-20:]))
             bb_up = round(ma20 + 2.0 * std20, 2)
@@ -380,14 +405,22 @@ def scan_all_stocks():
             _, _, w_osc = compute_macd(w_c) if len(w_c) >= 26 else (None, None, np.array([0.0]))
             w_bull = (curr_p >= w_ma10) and (float(w_osc[-1]) >= 0 if len(w_osc) > 0 else True)
 
-            high_20d = round(float(np.max(h[-20:])), 2)
-            castle_ceiling = round(max(bb_up, high_20d), 2)
+            # 模組 5：動態防禦城堡點位（確保天花板 > 現價 >= 鋼鐵防線 >= 極限停損）
+            prev_high_20d = round(float(np.max(h[-21:-1])), 2)
+            raw_ceiling = max(bb_up, prev_high_20d)
+            if raw_ceiling <= curr_p:
+                castle_ceiling = round(curr_p * 1.07, 2)
+            else:
+                castle_ceiling = round(raw_ceiling, 2)
+
             castle_month = ma20
-            castle_iron = round(max(ma10, float(l[-1])), 2) if curr_p >= ma10 else ma20
+            # 鋼鐵防線：取 10MA 與當日低點之較高者，但嚴禁高於現價
+            support_cand = max(ma10, float(l[-1])) if curr_p >= ma10 else min(ma20, float(l[-1]))
+            castle_iron = round(min(curr_p, support_cand), 2)
             castle_stop = round(min(ma60, float(np.min(l[-20:]))), 2)
 
             tdcc_val = tdcc_dict.get(code, None)
-            tdcc_str = f"{tdcc_val:.1f}%" if tdcc_val is not None else "盤後更新"
+            tdcc_str = f"{tdcc_val:.1f}%" if tdcc_val is not None else "未揭露"
             yoy_val = rev_dict.get(code, None)
             yoy_str = f"{yoy_val:+.1f}%" if yoy_val is not None else "待公告"
 
@@ -408,6 +441,7 @@ def scan_all_stocks():
                 "月營收YoY": yoy_str
             }
 
+            # 分頁二：短線實戰名將篩選 (嚴格要求站穩 20MA 月線)
             if curr_p >= ma20 and ma20 >= ma60 * 0.98:
                 if chg_1d >= 2.0 and vol_ratio >= 1.35:
                     score = 85 + int(min(15, vol_ratio * 3 + chg_1d))
@@ -439,15 +473,23 @@ def scan_all_stocks():
                     r3 = {"趨勢狀態": pattern, **row_base}
                     list_tab2_orbit.append(r3)
 
-            if curr_p >= ma60 and ma20 >= ma60 and w_bull:
+            # 分頁三：長期投資波段區 (嚴格要求：現價 >= 20MA >= 60MA + 週K守10週線 + 月營收YoY不為負)
+            rev_ok = (yoy_val is None) or (yoy_val > 0)
+            if curr_p >= ma20 and ma20 >= ma60 and w_bull and rev_ok:
                 l_score = 85
-                if yoy_val and yoy_val > 0:
+                if yoy_val and yoy_val >= 15.0:
                     l_score += 8
-                if tdcc_val and tdcc_val >= 50.0:
+                elif yoy_val and yoy_val > 0:
+                    l_score += 5
+                if tdcc_val and tdcc_val >= 60.0:
                     l_score += 7
+                elif tdcc_val and tdcc_val >= 45.0:
+                    l_score += 4
+                if ma60 >= ma120:
+                    l_score += 3
                 r_long = {
                     "波段總分": min(100, l_score),
-                    "長線格局定性": "✅ 週K守10週線＋日線多頭排列 (長線保護短線)",
+                    "長線格局定性": "✅ 週K守10週線＋站穩月季線＋基本面有基",
                     **row_base
                 }
                 list_tab3_long.append(r_long)
@@ -467,7 +509,7 @@ def scan_all_stocks():
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
 st.markdown("## 🏛️ 台股每日戰情室 v31.5 (Streamlit 雲端實戰版)")
-st.caption(f"🕒 台灣時間定錨：{now_str} ｜ 數據源：證交所/櫃買中心 OpenAPI ＆ Yahoo Finance 真實K線")
+st.caption(f"🕒 台灣時間定錨：{now_str} ｜ 數據源：證交所/櫃買中心/集保中心 OpenAPI ＆ Yahoo Finance 真實K線")
 
 with st.expander("⚙️ 點此展開／調整【0050正2 ＋ 0050 母子艦隊持倉與成本參數】", expanded=False):
     c_in1, c_in2, c_in3, c_in4, c_in5 = st.columns(5)
@@ -485,7 +527,7 @@ with st.expander("⚙️ 點此展開／調整【0050正2 ＋ 0050 母子艦隊�
 if st.button("🔄 立即重新抓取最新盤況與報價"):
     st.cache_data.clear()
 
-with st.spinner("📡 正在連線證交所與 Yahoo Finance 同步真實大盤與個股 K 線數據..."):
+with st.spinner("📡 正在連線證交所、集保中心與 Yahoo Finance 同步最新大盤與個股 K 線數據..."):
     fleet = fetch_and_analyze_fleet()
     df_launch, df_pullback, df_orbit, df_long, vol_note = scan_all_stocks()
 
@@ -508,7 +550,6 @@ total_pnl = pnl_2x + pnl_1x
 ratio_2x_pct = round((val_2x / max(1, total_fleet_val)) * 100, 1)
 effective_leverage = round(((val_1x * 1.0 + val_2x * 2.0) / max(1, total_fleet_val)) * 100, 1)
 
-# 預先格式化所有顯示字串（100% 避免 f-string 語法衝突）
 twii_label_str = f"加權指數 ({fleet['date_str']})"
 twii_val_str = f"{twii_now:,.1f} 點"
 twii_delta_str = f"{fleet['twii_chg_pct']:+.2f}%"
@@ -628,7 +669,7 @@ with tab1:
     st.dataframe(df_t50_levels, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.caption(f"⚡ 量能推估狀態：{vol_note} ｜ 城堡點位：天花板(20日高/布林上軌)、月線承接(20MA)、鋼鐵防線(10MA/紅K低)、極限停損(60MA)")
+    st.caption(f"⚡ 量能推估狀態：{vol_note} ｜ 城堡點位：天花板(20日高/布林上軌/突破延伸+7%)、月線承接(20MA)、鋼鐵防線(10MA/紅K低)、極限停損(60MA)")
     
     st.markdown("#### 🔥 【表一：階段 3(3) 旱地拔蔥 ＆ 七大實戰名將點火榜】")
     if not df_launch.empty:
@@ -649,8 +690,8 @@ with tab2:
         st.info("今日暫無符合多頭軌道推升之標的。")
 
 with tab3:
-    st.markdown("#### 🏛️ 【長期投資波段區：週K守10週線 ＋ 日線多頭 ＋ 基本面/大戶雙守旗艦榜】")
-    st.caption("篩選基準：嚴守模組 3「長線保護短線」原則（站穩 10 週均線、日線 20MA > 60MA、並標註 TDCC 400張大戶比例與最新月營收 YoY）")
+    st.markdown("#### 🏛️ 【長期投資波段區：週K守10週線 ＋ 日線站穩月季線 ＋ 月營收正成長旗艦榜】")
+    st.caption("篩選基準：嚴守模組 2 與模組 3「長線保護短線」原則（站穩 10 週均線、現價 >= 20MA >= 60MA、月營收 YoY > 0、並標註集保 400張大戶比例）")
     if not df_long.empty:
         st.dataframe(df_long, use_container_width=True, hide_index=True)
     else:
