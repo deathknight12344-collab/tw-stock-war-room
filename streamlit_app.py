@@ -7,12 +7,13 @@ import pytz
 import requests
 import urllib3
 import io
+import time
 
 # 關閉 SSL 憑證警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(
-    page_title="台股每日戰情室 v31.5",
+    page_title="台股每日戰情室 v32.0",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -24,6 +25,13 @@ st.set_page_config(
 def get_tw_now():
     tz = pytz.timezone("Asia/Taipei")
     return datetime.datetime.now(tz)
+
+def is_market_open():
+    now = get_tw_now()
+    if now.weekday() >= 5:
+        return False
+    t_val = now.hour * 60 + now.minute
+    return (9 * 60) <= t_val <= (13 * 60 + 35)
 
 def get_volume_multiplier():
     now = get_tw_now()
@@ -52,9 +60,105 @@ def get_volume_multiplier():
     return mult_clean, f"盤中即時推估 (U型倍率 {mult_clean:.2f}x)"
 
 # ==========================================
-# 模組 2：證交所/櫃買中心/集保中心 OpenAPI 直連引擎
+# 模組 2：證交所/櫃買中心「MIS 官方 5 秒即時報價引擎」
 # ==========================================
-@st.cache_data(ttl=300, show_spinner=False)
+def parse_mis_price(item):
+    """解析證交所 MIS 報價：優先取當盤成交價 z，若當盤無成交('-')則取最佳買賣價中樞，最後取昨收 y"""
+    def to_f(val):
+        try:
+            s = str(val).replace(",", "").strip()
+            return float(s) if s not in ["", "-", "--", "None"] else None
+        except Exception:
+            return None
+
+    z_val = to_f(item.get("z"))
+    if z_val and z_val > 0:
+        return z_val
+
+    # 若當盤無成交 z == '-'，取最佳五檔買一與賣一
+    b_str = str(item.get("b", "")).split("_")[0]
+    a_str = str(item.get("a", "")).split("_")[0]
+    b_val = to_f(b_str)
+    a_val = to_f(a_str)
+    if b_val and a_val and b_val > 0 and a_val > 0:
+        return round((b_val + a_val) / 2.0, 2)
+    if b_val and b_val > 0:
+        return b_val
+    if a_val and a_val > 0:
+        return a_val
+
+    y_val = to_f(item.get("y"))
+    return y_val if (y_val and y_val > 0) else None
+
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_mis_realtime_batch(code_market_ tuples):
+    """
+    直連台灣證交所 MIS 即時行情伺服器 (mis.twse.com.tw)
+    支援加權指數 (t00)、上市 (tse) 與上櫃 (otc) 5秒級即時報價
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8",
+        "Referer": "https://mis.twse.com.tw/stock/index.jsp"
+    }
+    rt_dict = {}
+    queries = ["tse_t00.tw"]
+    for code, mkt in code_market_tuples:
+        prefix = "tse" if mkt == "TW" else "otc"
+        queries.append(f"{prefix}_{code}.tw")
+
+    # 分批查詢（每批 25 檔，確保 MIS 瞬間回應不超時）
+    batch_size = 25
+    for i in range(0, len(queries), batch_size):
+        chunk = queries[i:i + batch_size]
+        ex_ch = "|".join(chunk)
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time() * 1000)}"
+        try:
+            r = requests.get(url, headers=headers, timeout=5, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                for item in data.get("msgArray", []):
+                    c_code = str(item.get("c", "")).strip()
+                    p_now = parse_mis_price(item)
+                    if not c_code or p_now is None:
+                        continue
+                    try:
+                        y_prev = float(str(item.get("y", p_now)).replace(",", ""))
+                    except Exception:
+                        y_prev = p_now
+                    try:
+                        h_now = float(str(item.get("h", p_now)).replace(",", ""))
+                    except Exception:
+                        h_now = p_now
+                    try:
+                        l_now = float(str(item.get("l", p_now)).replace(",", ""))
+                    except Exception:
+                        l_now = p_now
+                    try:
+                        v_lots = int(float(str(item.get("v", "0")).replace(",", "")))
+                    except Exception:
+                        v_lots = 0
+
+                    chg_pct = round(((p_now - y_prev) / y_prev) * 100, 2) if y_prev > 0 else 0.0
+                    rt_dict[c_code] = {
+                        "close": round(p_now, 2),
+                        "high": round(max(h_now, p_now), 2),
+                        "low": round(min(l_now, p_now), 2),
+                        "prev_close": y_prev,
+                        "chg_pct": chg_pct,
+                        "vol_lots": v_lots,
+                        "time": str(item.get("t", "")),
+                        "date": str(item.get("d", ""))
+                    }
+        except Exception:
+            continue
+
+    return rt_dict
+
+# ==========================================
+# 模組 3：證交所/櫃買中心/集保中心 OpenAPI 基本面與盤後總表
+# ==========================================
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_official_market_data():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     price_dict = {}
@@ -137,8 +241,7 @@ def fetch_official_market_data():
     except Exception:
         pass
 
-    # 3. TDCC 集保 400 張以上大戶比例（優先抓取 TDCC 官方上市櫃 CSV 總表，再以證交所 JSON 備援）
-    # 嚴格過濾級距 12, 13, 14, 15 (排除級距 16 合計列與差異列)
+    # 3. TDCC 集保 400 張以上大戶比例（嚴格過濾級距 12, 13, 14, 15）
     try:
         r_csv = requests.get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", headers=headers, timeout=15, verify=False)
         if r_csv.status_code == 200 and len(r_csv.text) > 500:
@@ -159,31 +262,7 @@ def fetch_official_market_data():
     except Exception:
         pass
 
-    if not tdcc_dict:
-        try:
-            r_tdcc = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap11_L", headers=headers, timeout=15, verify=False)
-            if r_tdcc.status_code == 200:
-                temp_tdcc = {}
-                for row in r_tdcc.json():
-                    code = str(row.get("證券代號", row.get("公司代號", ""))).strip()
-                    lvl = str(row.get("持股分級", "")).strip()
-                    pct_val = "0"
-                    for k_name, v_val in row.items():
-                        if "比例" in k_name:
-                            pct_val = str(v_val).replace(",", "").strip()
-                            break
-                    if lvl in ["12", "13", "14", "15"]:
-                        try:
-                            temp_tdcc[code] = temp_tdcc.get(code, 0.0) + float(pct_val)
-                        except Exception:
-                            pass
-                for k, v in temp_tdcc.items():
-                    if 0 < v <= 100.0:
-                        tdcc_dict[k] = round(v, 1)
-        except Exception:
-            pass
-
-    # 4. 上市櫃最新月營收 YoY (%)（自動識別「營業收入-去年同月增減(%)」等欄位名稱）
+    # 4. 上市櫃最新月營收 YoY (%)
     for url in [
         "https://openapi.twse.com.tw/v1/opendata/t187ap05_L",
         "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
@@ -209,7 +288,7 @@ def fetch_official_market_data():
     return price_dict, tdcc_dict, rev_dict, twii_official
 
 # ==========================================
-# 模組 3：核心高動能科技與重電種子資料庫
+# 模組 4：核心高動能科技與重電種子資料庫
 # ==========================================
 CORE_WATCHLIST = {
     "2330": ("台積電", "晶圓與封測", "TW"), "2454": ("聯發科", "IC設計與IP", "TW"),
@@ -237,7 +316,7 @@ CORE_WATCHLIST = {
 }
 
 # ==========================================
-# 模組 4：技術指標與動態防禦城堡演算核心
+# 模組 5：技術指標與動態防禦城堡演算核心
 # ==========================================
 def compute_kd(highs, lows, closes, n=9):
     k_val, d_val = 50.0, 50.0
@@ -259,37 +338,76 @@ def compute_macd(closes):
     osc = dif - dea
     return dif.values, dea.values, osc.values
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_and_analyze_fleet():
-    price_dict, _, _, twii_official = fetch_official_market_data()
+@st.cache_data(ttl=900, show_spinner=False)
+def download_historical_klines(yf_tickers_tuple):
+    """歷史 K 線獨立快取 15 分鐘，讓盤中秒速刷新時不必重複下載 1 年份歷史資料"""
+    try:
+        return yf.download(list(yf_tickers_tuple), period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=900, show_spinner=False)
+def download_fleet_history():
     tickers = ["^TWII", "00631L.TW", "0050.TW"]
-    
+    try:
+        return yf.download(tickers, period="2y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
+    except Exception:
+        return pd.DataFrame()
+
+def fetch_and_analyze_fleet(rt_quotes):
+    price_dict, _, _, twii_official = fetch_official_market_data()
+    data = download_fleet_history()
+    today_str = get_tw_now().strftime("%Y-%m-%d")
+
     twii_now = twii_official["close"] if twii_official["close"] > 0 else 23000.0
     twii_chg_pct = twii_official["chg_pct"]
+    twii_high = twii_now
+    twii_low = twii_now
     ma20 = round(twii_now * 0.985, 1)
     ma60 = round(twii_now * 0.96, 1)
     ma240 = round(twii_now * 0.90, 1)
     bb_upper = round(twii_now * 1.03, 1)
     bb_lower = round(twii_now * 0.95, 1)
-    k9, d9, macd_hist = 60.0, 55.0, 15.0
-    date_str = get_tw_now().strftime("%Y-%m-%d")
+    k9, d9, macd_hist = 50.0, 50.0, 0.0
+    date_str = today_str
+    quote_src = "Yahoo Finance / 證交所"
 
-    p_2x = price_dict.get("00631L", {}).get("close", 37.15)
+    p_2x = price_dict.get("00631L", {}).get("close", 36.51)
     p_2x_chg = price_dict.get("00631L", {}).get("chg_pct", 0.0)
-    p_1x = price_dict.get("0050", {}).get("close", 109.0)
+    p_1x = price_dict.get("0050", {}).get("close", 108.15)
     p_1x_chg = price_dict.get("0050", {}).get("chg_pct", 0.0)
 
     try:
-        data = yf.download(tickers, period="2y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
         if not data.empty:
-            df_twii = data["^TWII"].dropna(subset=["Close"])
+            df_twii = data["^TWII"].dropna(subset=["Close"]).copy()
             if len(df_twii) >= 20:
                 c_twii = df_twii["Close"].values.astype(float)
                 h_twii = df_twii["High"].values.astype(float)
                 l_twii = df_twii["Low"].values.astype(float)
+                last_k_date = df_twii.index[-1].strftime("%Y-%m-%d")
+
+                # 若 MIS 有最新盤中即時大盤點位 (t00)，立即注入最新一根 K 棒
+                if "t00" in rt_quotes and rt_quotes["t00"]["close"] > 0:
+                    rt_t00 = rt_quotes["t00"]
+                    if last_k_date == today_str:
+                        c_twii[-1] = rt_t00["close"]
+                        h_twii[-1] = max(h_twii[-1], rt_t00["high"])
+                        l_twii[-1] = min(l_twii[-1], rt_t00["low"])
+                    else:
+                        c_twii = np.append(c_twii, rt_t00["close"])
+                        h_twii = np.append(h_twii, rt_t00["high"])
+                        l_twii = np.append(l_twii, rt_t00["low"])
+                    twii_chg_pct = rt_t00["chg_pct"]
+                    date_str = f"{today_str} {rt_t00['time']}"
+                    quote_src = f"🟢 證交所 MIS 即時直連 ({rt_t00['time']})"
+                else:
+                    twii_prev = float(c_twii[-2]) if len(c_twii) > 1 else float(c_twii[-1])
+                    twii_chg_pct = round((float(c_twii[-1]) - twii_prev) / twii_prev * 100, 2)
+                    date_str = last_k_date
+
                 twii_now = round(float(c_twii[-1]), 1)
-                twii_prev = float(c_twii[-2]) if len(c_twii) > 1 else twii_now
-                twii_chg_pct = round((twii_now - twii_prev) / twii_prev * 100, 2)
+                twii_high = round(float(h_twii[-1]), 1)
+                twii_low = round(float(l_twii[-1]), 1)
                 ma20 = round(float(np.mean(c_twii[-20:])), 1)
                 ma60 = round(float(np.mean(c_twii[-60:])), 1) if len(c_twii) >= 60 else ma20
                 ma240 = round(float(np.mean(c_twii[-240:])), 1) if len(c_twii) >= 240 else ma60
@@ -299,16 +417,21 @@ def fetch_and_analyze_fleet():
                 k9, d9 = compute_kd(h_twii[-60:], l_twii[-60:], c_twii[-60:])
                 _, _, osc_twii = compute_macd(c_twii)
                 macd_hist = round(float(osc_twii[-1]), 1)
-                date_str = df_twii.index[-1].strftime("%Y-%m-%d")
 
             df_2x = data["00631L.TW"].dropna(subset=["Close"])
-            if len(df_2x) >= 2:
+            if "00631L" in rt_quotes and rt_quotes["00631L"]["close"] > 0:
+                p_2x = rt_quotes["00631L"]["close"]
+                p_2x_chg = rt_quotes["00631L"]["chg_pct"]
+            elif len(df_2x) >= 2:
                 p_2x = round(float(df_2x["Close"].values[-1]), 2)
                 p_2x_prev = float(df_2x["Close"].values[-2])
                 p_2x_chg = round((p_2x - p_2x_prev) / p_2x_prev * 100, 2)
 
             df_1x = data["0050.TW"].dropna(subset=["Close"])
-            if len(df_1x) >= 2:
+            if "0050" in rt_quotes and rt_quotes["0050"]["close"] > 0:
+                p_1x = rt_quotes["0050"]["close"]
+                p_1x_chg = rt_quotes["0050"]["chg_pct"]
+            elif len(df_1x) >= 2:
                 p_1x = round(float(df_1x["Close"].values[-1]), 2)
                 p_1x_prev = float(df_1x["Close"].values[-2])
                 p_1x_chg = round((p_1x - p_1x_prev) / p_1x_prev * 100, 2)
@@ -320,19 +443,20 @@ def fetch_and_analyze_fleet():
 
     return {
         "twii_now": twii_now, "twii_chg_pct": twii_chg_pct,
+        "twii_high": twii_high, "twii_low": twii_low,
         "ma20": ma20, "ma60": ma60, "ma240": ma240,
         "bb_upper": bb_upper, "bb_lower": bb_lower,
         "bias_20": bias_20, "bias_60": bias_60,
         "k9": k9, "d9": d9, "macd_hist": macd_hist,
         "p_2x": p_2x, "p_2x_chg": p_2x_chg,
         "p_1x": p_1x, "p_1x_chg": p_1x_chg,
-        "date_str": date_str
+        "date_str": date_str, "quote_src": quote_src
     }
 
-@st.cache_data(ttl=300, show_spinner=False)
 def scan_all_stocks():
     price_dict, tdcc_dict, rev_dict, _ = fetch_official_market_data()
     vol_mult, vol_note = get_volume_multiplier()
+    today_str = get_tw_now().strftime("%Y-%m-%d")
 
     candidates = dict(CORE_WATCHLIST)
     for code, info in price_dict.items():
@@ -341,35 +465,52 @@ def scan_all_stocks():
             if len(candidates) >= 75:
                 break
 
+    # 批次抓取 MIS 5秒級即時報價 (含大盤 t00、00631L、0050 與所有候選個股)
+    mis_targets = [("00631L", "TW"), ("0050", "TW")] + [(c, m) for c, (_, _, m) in candidates.items()]
+    rt_quotes = fetch_mis_realtime_batch(tuple(mis_targets))
+
     yf_map = {}
     for c, (_, _, m) in candidates.items():
         suffix = "TW" if m == "TW" else "TWO"
         yf_map[f"{c}.{suffix}"] = c
 
-    yf_tickers = list(yf_map.keys())
+    raw_df = download_historical_klines(tuple(yf_map.keys()))
+
     list_tab2_launch = []
     list_tab2_pullback = []
     list_tab2_orbit = []
     list_tab3_long = []
 
-    try:
-        raw_df = yf.download(yf_tickers, period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
-    except Exception:
-        raw_df = pd.DataFrame()
-
     for yf_tkr, code in yf_map.items():
         try:
             if raw_df.empty or yf_tkr not in raw_df:
                 continue
-            df_s = raw_df[yf_tkr].dropna(subset=["Close"])
+            df_s = raw_df[yf_tkr].dropna(subset=["Close"]).copy()
             if len(df_s) < 65:
                 continue
             c = df_s["Close"].values.astype(float)
             h = df_s["High"].values.astype(float)
             l = df_s["Low"].values.astype(float)
             v = (df_s["Volume"].values.astype(float) / 1000.0)
+            last_k_date = df_s.index[-1].strftime("%Y-%m-%d")
 
             name, sector, _ = candidates[code]
+
+            # 若 MIS 即時引擎有最新盤中報價，直接覆寫或追加當日最新 K 棒
+            if code in rt_quotes and rt_quotes[code]["close"] > 0:
+                rt = rt_quotes[code]
+                if last_k_date == today_str:
+                    c[-1] = rt["close"]
+                    h[-1] = max(h[-1], rt["high"])
+                    l[-1] = min(l[-1], rt["low"])
+                    if rt["vol_lots"] > 0:
+                        v[-1] = float(rt["vol_lots"])
+                else:
+                    c = np.append(c, rt["close"])
+                    h = np.append(h, rt["high"])
+                    l = np.append(l, rt["low"])
+                    v = np.append(v, float(rt["vol_lots"]) if rt["vol_lots"] > 0 else v[-1])
+
             curr_p = round(float(c[-1]), 2)
             prev_p = float(c[-2])
             chg_1d = round((curr_p - prev_p) / prev_p * 100, 2) if prev_p > 0 else 0.0
@@ -379,8 +520,10 @@ def scan_all_stocks():
             ma5_vol = max(1.0, float(np.mean(v[-6:-1])))
             vol_ratio = round(est_vol / ma5_vol, 2)
 
+            # 模組 1：流動性檢驗（成交量 < 500張且股價 < 100元直接跳過；高價股標註量縮控盤）
             if est_vol < 500 and curr_p < 100.0:
                 continue
+            liq_tag = " ⚠️量縮控盤" if (est_vol < 500 and curr_p >= 100.0) else ""
 
             ma5 = round(float(np.mean(c[-5:])), 2)
             ma10 = round(float(np.mean(c[-10:])), 2)
@@ -405,16 +548,11 @@ def scan_all_stocks():
             _, _, w_osc = compute_macd(w_c) if len(w_c) >= 26 else (None, None, np.array([0.0]))
             w_bull = (curr_p >= w_ma10) and (float(w_osc[-1]) >= 0 if len(w_osc) > 0 else True)
 
-            # 模組 5：動態防禦城堡點位（確保天花板 > 現價 >= 鋼鐵防線 >= 極限停損）
+            # 模組 5：動態防禦城堡點位
             prev_high_20d = round(float(np.max(h[-21:-1])), 2)
             raw_ceiling = max(bb_up, prev_high_20d)
-            if raw_ceiling <= curr_p:
-                castle_ceiling = round(curr_p * 1.07, 2)
-            else:
-                castle_ceiling = round(raw_ceiling, 2)
-
+            castle_ceiling = round(curr_p * 1.07, 2) if raw_ceiling <= curr_p else round(raw_ceiling, 2)
             castle_month = ma20
-            # 鋼鐵防線：取 10MA 與當日低點之較高者，但嚴禁高於現價
             support_cand = max(ma10, float(l[-1])) if curr_p >= ma10 else min(ma20, float(l[-1]))
             castle_iron = round(min(curr_p, support_cand), 2)
             castle_stop = round(min(ma60, float(np.min(l[-20:]))), 2)
@@ -426,7 +564,7 @@ def scan_all_stocks():
 
             row_base = {
                 "代碼": code,
-                "股名": name,
+                "股名": f"{name}{liq_tag}",
                 "族群": sector,
                 "現價": curr_p,
                 "今日%": chg_1d,
@@ -441,8 +579,11 @@ def scan_all_stocks():
                 "月營收YoY": yoy_str
             }
 
-            # 分頁二：短線實戰名將篩選 (嚴格要求站穩 20MA 月線)
-            if curr_p >= ma20 and ma20 >= ma60 * 0.98:
+            # 模組 8：排除「價跌爆量長黑倒貨股」（如今日跌 > 2.2% 且量比 > 1.2，或單日重挫 > 3.0%）
+            is_heavy_dump = (chg_1d <= -2.2 and vol_ratio >= 1.2) or (chg_1d <= -3.0)
+
+            if curr_p >= ma20 and ma20 >= ma60 * 0.98 and (not is_heavy_dump):
+                # 表一：旱地拔蔥點火榜
                 if chg_1d >= 2.0 and vol_ratio >= 1.35:
                     score = 85 + int(min(15, vol_ratio * 3 + chg_1d))
                     if ma_tangle_pct <= 3.5:
@@ -459,13 +600,15 @@ def scan_all_stocks():
                     r1 = {"實戰優先分": min(100, score), "名將戰法診斷": pattern, **row_base}
                     list_tab2_launch.append(r1)
 
-                elif (-2.5 <= chg_1d <= 2.2) and (vol_ratio <= 0.85) and (curr_p >= ma20):
+                # 表二：N字量縮回測低接榜
+                elif (-2.2 <= chg_1d <= 2.2) and (vol_ratio <= 0.85) and (curr_p >= ma20):
                     score = 82 + int((1.0 - vol_ratio) * 15)
                     pattern = "⚡ 神準/台光電型：N字量縮回測10/20MA有守"
                     r2 = {"蓄勢評分": min(98, score), "名將戰法診斷": pattern, **row_base}
                     list_tab2_pullback.append(r2)
 
-                elif curr_p >= ma5 >= ma10 >= ma20:
+                # 表三：上升軌道推升榜（嚴格要求今日未破 5MA 且非爆量長黑）
+                elif curr_p >= ma5 >= ma10 >= ma20 and chg_1d > -2.0:
                     if chg_3d >= 10.0 or curr_p >= bb_up:
                         pattern = "⚠️ 3日急拉/逼近布林上軌：切勿追高・分批鎖利"
                     else:
@@ -473,9 +616,9 @@ def scan_all_stocks():
                     r3 = {"趨勢狀態": pattern, **row_base}
                     list_tab2_orbit.append(r3)
 
-            # 分頁三：長期投資波段區 (嚴格要求：現價 >= 20MA >= 60MA + 週K守10週線 + 月營收YoY不為負)
+            # 分頁三：長期投資波段區（同時排除當日爆量重挫股）
             rev_ok = (yoy_val is None) or (yoy_val > 0)
-            if curr_p >= ma20 and ma20 >= ma60 and w_bull and rev_ok:
+            if curr_p >= ma20 and ma20 >= ma60 and w_bull and rev_ok and (not is_heavy_dump):
                 l_score = 85
                 if yoy_val and yoy_val >= 15.0:
                     l_score += 8
@@ -502,14 +645,13 @@ def scan_all_stocks():
     df_t3 = pd.DataFrame(list_tab2_orbit).sort_values(by="3日%", ascending=False) if list_tab2_orbit else pd.DataFrame()
     df_long = pd.DataFrame(list_tab3_long).sort_values(by="波段總分", ascending=False) if list_tab3_long else pd.DataFrame()
 
-    return df_t1, df_t2, df_t3, df_long, vol_note
+    return df_t1, df_t2, df_t3, df_long, vol_note, rt_quotes
 
 # ==========================================
-# 模組 5：Streamlit 戰情室主介面
+# 模組 6：Streamlit 戰情室主介面 (四欄司令塔 ＋ 五階季線前哨敏捷版)
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🏛️ 台股每日戰情室 v31.5 (Streamlit 雲端實戰版)")
-st.caption(f"🕒 台灣時間定錨：{now_str} ｜ 數據源：證交所/櫃買中心/集保中心 OpenAPI ＆ Yahoo Finance 真實K線")
+st.markdown("## 🏛️ 台股每日戰情室 v32.0 (MIS 即時直連・季線前哨敏捷版)")
 
 with st.expander("⚙️ 點此展開／調整【0050正2 ＋ 0050 母子艦隊持倉與成本參數】", expanded=False):
     c_in1, c_in2, c_in3, c_in4, c_in5 = st.columns(5)
@@ -524,12 +666,19 @@ with st.expander("⚙️ 點此展開／調整【0050正2 ＋ 0050 母子艦隊�
     with c_in5:
         in_cash_pool = st.number_input("已收割待買回現金池(元)", value=0.0, step=1000.0, format="%.0f")
 
-if st.button("🔄 立即重新抓取最新盤況與報價"):
-    st.cache_data.clear()
+btn_col1, btn_col2, btn_col3 = st.columns([2, 2, 4])
+with btn_col1:
+    if st.button("⚡ 秒速刷新盤中即時報價 (MIS直連)", use_container_width=True):
+        fetch_mis_realtime_batch.clear()
+with btn_col2:
+    if st.button("🔄 完整重掃全市場與歷史K線", use_container_width=True):
+        st.cache_data.clear()
 
-with st.spinner("📡 正在連線證交所、集保中心與 Yahoo Finance 同步最新大盤與個股 K 線數據..."):
-    fleet = fetch_and_analyze_fleet()
-    df_launch, df_pullback, df_orbit, df_long, vol_note = scan_all_stocks()
+with st.spinner("📡 正在同步證交所 MIS 即時行情與個股技術指標..."):
+    df_launch, df_pullback, df_orbit, df_long, vol_note, rt_quotes = scan_all_stocks()
+    fleet = fetch_and_analyze_fleet(rt_quotes)
+
+st.caption(f"🕒 台灣時間：{now_str} ｜ 報價引擎：{fleet['quote_src']} ｜ 量能狀態：{vol_note}")
 
 twii_now = fleet["twii_now"]
 p_2x = fleet["p_2x"]
@@ -545,23 +694,13 @@ cost_total_1x = int(round(in_lots_1x * 1000 * in_cost_1x))
 pnl_1x = val_1x - cost_total_1x
 pnl_1x_pct = round(((p_1x - in_cost_1x) / max(0.01, in_cost_1x)) * 100, 2)
 
+total_cost_all = cost_total_2x + cost_total_1x
 total_fleet_val = val_2x + val_1x + int(in_cash_pool)
 total_pnl = pnl_2x + pnl_1x
+total_pnl_pct = round((total_pnl / max(1, total_cost_all)) * 100, 2)
 ratio_2x_pct = round((val_2x / max(1, total_fleet_val)) * 100, 1)
+ratio_1x_pct = round((val_1x / max(1, total_fleet_val)) * 100, 1)
 effective_leverage = round(((val_1x * 1.0 + val_2x * 2.0) / max(1, total_fleet_val)) * 100, 1)
-
-twii_label_str = f"加權指數 ({fleet['date_str']})"
-twii_val_str = f"{twii_now:,.1f} 點"
-twii_delta_str = f"{fleet['twii_chg_pct']:+.2f}%"
-
-p2x_chg_val = fleet["p_2x_chg"]
-p2x_label_str = f"00631L 現價 (今日 {p2x_chg_val:+.2f}%)"
-p2x_val_str = f"{p_2x:,.2f} 元"
-p2x_delta_str = f"{pnl_2x:+,} 元 ({pnl_2x_pct:+.2f}%)"
-
-p1x_label_str = f"0050 現價 ({p_1x:,.2f} 元) ｜ 艦隊總市值"
-total_val_str = f"{total_fleet_val:,} 元"
-total_delta_str = f"總損益 {total_pnl:+,} 元"
 
 tab1, tab2, tab3 = st.tabs([
     "📊 0050正2 ＋ 0050 母子艦隊滾雪球戰情室",
@@ -570,106 +709,171 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 with tab1:
-    col1, col2, col3 = st.columns(3)
+    # ==========================================
+    # 四欄平行對齊司令塔：加權指數 ｜ 0050正2 ｜ 0050 ｜ 總市值
+    # ==========================================
+    col1, col2, col3, col4 = st.columns(4)
+
     with col1:
-        st.markdown("#### 🏛️ 加權指數司令塔")
-        st.metric(label=twii_label_str, value=twii_val_str, delta=twii_delta_str)
-        kd_state = "金叉多頭" if fleet["k9"] >= fleet["d9"] else "死叉整理"
+        st.markdown("#### 🏛️ 加權指數")
+        st.metric(
+            label=f"台股大盤 ({fleet['date_str']})",
+            value=f"{twii_now:,.1f} 點",
+            delta=f"{fleet['twii_chg_pct']:+.2f}% (高低 {fleet['twii_low']:,.0f}~{fleet['twii_high']:,.0f})"
+        )
+        kd_state = "金叉多頭" if fleet["k9"] >= fleet["d9"] else ("超賣區警戒" if fleet["k9"] <= 25.0 else "死叉整理")
         st.caption(
-            f"• 月線(20MA)：`{fleet['ma20']:,.1f}` (乖離 `{fleet['bias_20']:+.2f}%`)\n\n"
-            f"• 季線(60MA)：`{fleet['ma60']:,.1f}` (乖離 `{fleet['bias_60']:+.2f}%`)\n\n"
-            f"• 日KD：`K9={fleet['k9']}` / `D9={fleet['d9']}` ({kd_state}) ｜ MACD柱：`{fleet['macd_hist']:+.1f}`"
+            f"• 月線(20MA)：`{fleet['ma20']:,.1f}` (`{fleet['bias_20']:+.2f}%`)\n\n"
+            f"• 季線(60MA)：`{fleet['ma60']:,.1f}` (`{fleet['bias_60']:+.2f}%`)\n\n"
+            f"• 日KD：`K9={fleet['k9']}` / `D9={fleet['d9']}` ({kd_state})"
         )
 
     with col2:
-        st.markdown("#### 🚀 0050正2 (00631L 子艦隊)")
-        st.metric(label=p2x_label_str, value=p2x_val_str, delta=p2x_delta_str)
+        st.markdown("#### 🚀 0050正2")
+        st.metric(
+            label=f"00631L 子艦隊 (今日 {fleet['p_2x_chg']:+.2f}%)",
+            value=f"{p_2x:,.2f} 元",
+            delta=f"損益 {pnl_2x:+,} 元 ({pnl_2x_pct:+.2f}%)"
+        )
         st.caption(
-            f"• 持有部位：`{in_lots_2x:.2f} 張` (均價 `{in_cost_2x:.2f} 元`)\n\n"
-            f"• 當前市值：`{val_2x:,} 元` (佔總艦隊 `{ratio_2x_pct}%`)"
+            f"• 持有部位：`{in_lots_2x:.2f} 張` (成本 `{in_cost_2x:.2f} 元`)\n\n"
+            f"• 部位市值：`{val_2x:,} 元` (佔比 `{ratio_2x_pct}%`)\n\n"
+            f"• 角色定錨：`2倍槓桿攻擊與滾張數主力`"
         )
 
     with col3:
-        st.markdown("#### 🛡️ 0050 壓艙石 ＆ 總艦隊")
-        st.metric(label=p1x_label_str, value=total_val_str, delta=total_delta_str)
+        st.markdown("#### 🛡️ 0050")
+        st.metric(
+            label=f"0050 壓艙石 (今日 {fleet['p_1x_chg']:+.2f}%)",
+            value=f"{p_1x:,.2f} 元",
+            delta=f"損益 {pnl_1x:+,} 元 ({pnl_1x_pct:+.2f}%)"
+        )
         st.caption(
-            f"• 0050 損益：`{pnl_1x:+,} 元 ({pnl_1x_pct:+.2f}%)`\n\n"
-            f"• 現金池：`{int(in_cash_pool):,} 元` ｜ 整體有效曝險：`{effective_leverage}%`"
+            f"• 持有部位：`{in_lots_1x:.2f} 張` (成本 `{in_cost_1x:.2f} 元`)\n\n"
+            f"• 部位市值：`{val_1x:,} 元` (佔比 `{ratio_1x_pct}%`)\n\n"
+            f"• 角色定錨：`長線底倉・領息與抗震中樞`"
+        )
+
+    with col4:
+        st.markdown("#### 💰 總市值")
+        st.metric(
+            label=f"母子艦隊總資產 (總成本 {total_cost_all:,} 元)",
+            value=f"{total_fleet_val:,} 元",
+            delta=f"總損益 {total_pnl:+,} 元 ({total_pnl_pct:+.2f}%)"
+        )
+        st.caption(
+            f"• 整體有效曝險：`{effective_leverage}%`\n\n"
+            f"• 待買回現金池：`{int(in_cash_pool):,} 元`\n\n"
+            f"• 艦隊結構：`正2 ({ratio_2x_pct}%) ＋ 0050 ({ratio_1x_pct}%)`"
         )
 
     st.markdown("---")
 
+    # ==========================================
+    # 五階動態敏捷實戰矩陣 (導入季線前哨 +1.6% 緩衝圈 & K9<25 超賣攔截)
+    # ==========================================
     def calc_target_2x(target_twii):
         pct_diff = (target_twii - twii_now) / max(1.0, twii_now)
         return round(p_2x * (1.0 + pct_diff * 2.0), 2)
 
-    t_bb_up = calc_target_2x(fleet["bb_upper"])
-    t_ma20 = calc_target_2x(fleet["ma20"])
-    t_ma60 = calc_target_2x(fleet["ma60"])
-    t_ma240 = calc_target_2x(fleet["ma240"])
+    # 計算五階大盤關鍵錨點
+    twii_harvest_zone = round(min(fleet["bb_upper"], fleet["ma20"] * 1.035), 1)
+    twii_ma20 = fleet["ma20"]
+    # 季線前哨防守圈：季線上方 1.6% 緩衝區（例如季線 46,089 * 1.016 = 46,826 點，完美對應 10/19 接近季線即有守！）
+    twii_ma60_buffer = round(fleet["ma60"] * 1.016, 1)
+    twii_ma60 = fleet["ma60"]
+    twii_ma240 = fleet["ma240"]
 
-    net_cash_harvest = int(round(t_bb_up * 1000 * (1.0 - 0.002425)))
+    t_harvest = calc_target_2x(twii_harvest_zone)
+    t_ma20 = calc_target_2x(twii_ma20)
+    t_ma60_buf = calc_target_2x(twii_ma60_buffer)
+    t_ma60 = calc_target_2x(twii_ma60)
+    t_ma240 = calc_target_2x(twii_ma240)
+
+    # 1. 高檔賣 1 張正2 買回試算
+    net_cash_harvest = int(round(t_harvest * 1000 * (1.0 - 0.002425)))
     shares_at_ma20 = int(net_cash_harvest // max(1.0, t_ma20))
+    shares_at_buf = int(net_cash_harvest // max(1.0, t_ma60_buf))
     shares_at_ma60 = int(net_cash_harvest // max(1.0, t_ma60))
     shares_at_ma240 = int(net_cash_harvest // max(1.0, t_ma240))
 
-    if twii_now >= fleet["bb_upper"]:
+    # 2. 季線前哨低接 1 張 ➔ 反彈回月線短差滾股試算
+    rebound_net_cash = int(round(t_ma20 * 1000 * (1.0 - 0.002425)))
+    rebound_gain_shares = int(rebound_net_cash // max(1.0, t_ma60_buf)) - 1000
+    rebound_gain_cash = int(round((t_ma20 - t_ma60_buf) * 1000))
+
+    # 智慧動態行動指令判定
+    if twii_now >= twii_harvest_zone or fleet["k9"] >= 82.0:
         st.warning(
-            f"🔥 **【高檔收割警報】大盤已觸及布林上軌 ({fleet['bb_upper']:,.1f} 點)！**\n\n"
-            f"• **行動指令**：建議逢高收割 **第 1 張機動 0050正2**（目標價約 **{t_bb_up:.2f} 元**），回收約 **{net_cash_harvest:,} 元** 轉入現金池，等待回測月線 `{t_ma20:.2f} 元` 買回滾大股數！"
+            f"🔥 **【高檔收割警報】大盤已進入高檔收割圈 ({twii_harvest_zone:,.1f} 點) 或 KD 高檔鈍化 (K9={fleet['k9']})！**\n\n"
+            f"• **實戰行動**：建議逢高賣出 **第 1 張機動 0050正2**（目標價約 **{t_harvest:.2f} 元**），淨回收約 **{net_cash_harvest:,} 元** 入池，靜待回測月線或季線前哨買回滾大股數！"
         )
-    elif twii_now >= fleet["ma20"]:
+    elif twii_now >= twii_ma20:
         st.info(
-            f"☀️ **【多頭主升段續抱】大盤穩守月線 ({fleet['ma20']:,.1f} 點) 之上，全艦隊抱緊處理！**\n\n"
-            f"• **行動指令**：手頭 `{in_lots_2x:.1f} 張 0050正2 ＋ {in_lots_1x:.1f} 張 0050` 請安心續抱（紀律 1/4：均線未破一律尊重）。\n"
-            f"• **下一收割錨點**：當大盤攻抵布林上軌 **{fleet['bb_upper']:,.1f} 點**（對應正2約 **{t_bb_up:.2f} 元**）時，再執行第 1 張高檔鎖利。"
+            f"☀️ **【多頭主升段續抱】大盤穩守月線 ({twii_ma20:,.1f} 點) 之上，全艦隊抱緊處理！**\n\n"
+            f"• **實戰行動**：手頭 `{in_lots_2x:.1f} 張正2 ＋ {in_lots_1x:.1f} 張 0050` 續抱（紀律 1/4：均線未破一律尊重）。下一收割點定錨於 **{twii_harvest_zone:,.1f} 點**（正2約 **{t_harvest:.2f} 元**）。"
         )
-    elif twii_now >= fleet["ma60"]:
+    elif (twii_now <= twii_ma60_buffer and twii_now >= twii_ma60 * 0.995) or (fleet["k9"] <= 26.0 and twii_now >= twii_ma60):
         st.success(
-            f"📈 **【良性洗盤回測區】大盤回測月線 ({fleet['ma20']:,.1f} 點) 與季線 ({fleet['ma60']:,.1f} 點) 區間！**\n\n"
-            f"• **行動指令**：若現金池有先前高檔收割資金，可關注日 KD 金叉訊號分批買回正2（參考承接價 **{t_ma60:.2f} ~ {t_ma20:.2f} 元**），完成「高賣低買賺股數」循環！"
+            f"🎯 **【季線前哨精準攔截訊號（黃金第一擊球區）】大盤已進入季線前 1.6% 防守圈 ({twii_ma60_buffer:,.1f} 點) 且日 K9={fleet['k9']} 落入超賣區！**\n\n"
+            f"• **實戰洞察**：台股多頭回檔往往「接近季線即有主力提前護盤有守」（目前季線乖離僅 `{fleet['bias_60']:+.2f}%`），不必死等跌破 `{twii_ma60:,.1f} 點`！\n\n"
+            f"• **實戰行動**：\n"
+            f"  1. **左側精準低接**：建議於現價 **`{p_2x:.2f} 元`**（季線前哨 `{t_ma60_buf:.2f} 元` 附近）立即動用 **50%~60% 現金池買進第 1 批正2**！\n"
+            f"  2. **敏捷反彈短差**：待大盤反彈回測 **20MA 月線 (`{twii_ma20:,.1f} 點` ➔ 正2約 `{t_ma20:.2f} 元`)** 時，該筆低接部位可先收割一趟 **約 `+{rebound_gain_cash:,} 元`（或原地多滾出 `+{rebound_gain_shares} 股`）** 的敏捷價差！"
+        )
+    elif twii_now > twii_ma60_buffer:
+        st.info(
+            f"📈 **【月季線中段洗盤區】大盤位於月線 ({twii_ma20:,.1f} 點) 與季線前哨 ({twii_ma60_buffer:,.1f} 點) 之間整理**\n\n"
+            f"• **實戰行動**：母子艦隊底倉續抱；現金池掛單鎖定下方 **【🎯 階段3：季線前哨防守圈 `{twii_ma60_buffer:,.1f} 點`（正2約 `{t_ma60_buf:.2f} 元`）】** 準備左側攔截！"
         )
     else:
         st.error(
-            f"❄️ **【破季線防禦警戒】大盤跌破 60MA 季線 ({fleet['ma60']:,.1f} 點)！**\n\n"
-            f"• **行動指令**：建議將子艦隊降載保留現金，嚴守長線年線大底 **{fleet['ma240']:,.1f} 點**（對應正2約 **{t_ma240:.2f} 元**）與 KD 落底金叉再行重裝回補。"
+            f"❄️ **【破季線防禦警戒】大盤跌破 60MA 季線 ({twii_ma60:,.1f} 點)！**\n\n"
+            f"• **實戰行動**：觀察 3 日內能否迅速站回季線（假跌破真穿頭）；若連續 3 日站不回，建議降載子艦隊保留現金，防守長線年線大底 **{twii_ma240:,.1f} 點**（正2約 **{t_ma240:.2f} 元**）。"
         )
 
-    st.markdown("#### 🎯 大盤四層指標 ➔ 0050正2 (00631L) 波段收割與回補精算表 (真實點位連動)")
+    st.markdown("#### 🎯 大盤五階敏捷指標 ➔ 0050正2 (00631L) 波段收割與季線前哨攔截精算表")
     df_t50_levels = pd.DataFrame([
         {
-            "波段階段與大盤指標錨點": "🔥 階段1：高檔收割點 (大盤布林上軌)",
-            "真實大盤點位": f"{fleet['bb_upper']:,.1f} 點",
-            "0050正2 對應目標價": f"{t_bb_up:,.2f} 元",
-            "艦隊操作指令": "逢高賣出第 1 張機動正2 鎖利",
-            "滾雪球增股效益試算": f"淨回收約 {net_cash_harvest:,} 元現金入池"
+            "五階實戰錨點": "🔥 階段1：高檔收割區 (布林上軌前哨 / K9>80)",
+            "大盤觸發點位": f"{twii_harvest_zone:,.1f} 點",
+            "0050正2 目標價": f"{t_harvest:,.2f} 元",
+            "敏捷實戰操作指令": "逢高賣出第 1 張機動正2 鎖利入池",
+            "滾張數／價差效益試算": f"淨回收約 {net_cash_harvest:,} 元現金待命"
         },
         {
-            "波段階段與大盤指標錨點": "📈 階段2：多頭回測承接 (大盤20MA月線)",
-            "真實大盤點位": f"{fleet['ma20']:,.1f} 點",
-            "0050正2 對應目標價": f"{t_ma20:,.2f} 元",
-            "艦隊操作指令": "月線有守且量縮止穩買回",
-            "滾雪球增股效益試算": f"高檔賣1張於此買回 ➔ 變 {shares_at_ma20:,} 股 ({shares_at_ma20 - 1000:+,}股)"
+            "五階實戰錨點": "⚡ 階段2：多空樞紐 ＆ 反彈短差點 (20MA月線)",
+            "大盤觸發點位": f"{twii_ma20:,.1f} 點",
+            "0050正2 目標價": f"{t_ma20:,.2f} 元",
+            "敏捷實戰操作指令": "初次回測有守續抱 ｜ 季線前哨低接者於此收割短差",
+            "滾張數／價差效益試算": f"前哨低接彈回月線賣出 ➔ 每張賺 +{rebound_gain_cash:,} 元 (或 +{rebound_gain_shares} 股)"
         },
         {
-            "波段階段與大盤指標錨點": "🛡️ 階段3：波段黃金買回點 (大盤60MA季線)",
-            "真實大盤點位": f"{fleet['ma60']:,.1f} 點",
-            "0050正2 對應目標價": f"{t_ma60:,.2f} 元",
-            "艦隊操作指令": "季線有守且日 KD 低檔金叉買回",
-            "滾雪球增股效益試算": f"高檔賣1張於此買回 ➔ 變 {shares_at_ma60:,} 股 ({shares_at_ma60 - 1000:+,}股)"
+            "五階實戰錨點": "🎯 階段3：黃金第一擊球區 (季線前哨+1.6% ＆ K9<25)",
+            "大盤觸發點位": f"{twii_ma60_buffer:,.1f} 點",
+            "0050正2 目標價": f"{t_ma60_buf:,.2f} 元",
+            "敏捷實戰操作指令": "接近季線即有守！動用 50%~60% 現金池左側先買回",
+            "滾張數／價差效益試算": f"高檔賣1張於此買回 ➔ 變 {shares_at_buf:,} 股 ({shares_at_buf - 1000:+,}股・不踏空)"
         },
         {
-            "波段階段與大盤指標錨點": "💎 階段4：長線鐵血大底 (大盤240MA年線)",
-            "真實大盤點位": f"{fleet['ma240']:,.1f} 點",
-            "0050正2 對應目標價": f"{t_ma240:,.2f} 元",
-            "艦隊操作指令": "歷史級國安防線・現金池全數重裝",
-            "滾雪球增股效益試算": f"高檔賣1張於此買回 ➔ 變 {shares_at_ma240:,} 股"
+            "五階實戰錨點": "🛡️ 階段4：黃金第二擊球區 (60MA季線鐵血地板)",
+            "大盤觸發點位": f"{twii_ma60:,.1f} 點",
+            "0050正2 目標價": f"{t_ma60:,.2f} 元",
+            "敏捷實戰操作指令": "極端恐慌觸及季線本體・剩餘 40%~50% 現金全數打滿",
+            "滾張數／價差效益試算": f"高檔賣1張於此買回 ➔ 變 {shares_at_ma60:,} 股 ({shares_at_ma60 - 1000:+,}股)"
+        },
+        {
+            "五階實戰錨點": "💎 階段5：長線鐵血大底 (240MA年線國安防線)",
+            "大盤觸發點位": f"{twii_ma240:,.1f} 點",
+            "0050正2 目標價": f"{t_ma240:,.2f} 元",
+            "敏捷實戰操作指令": "歷史級長線大底・質押或預備金重裝上陣",
+            "滾張數／價差效益試算": f"高檔賣1張於此買回 ➔ 變 {shares_at_ma240:,} 股 ({shares_at_ma240 - 1000:+,}股)"
         }
     ])
     st.dataframe(df_t50_levels, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.caption(f"⚡ 量能推估狀態：{vol_note} ｜ 城堡點位：天花板(20日高/布林上軌/突破延伸+7%)、月線承接(20MA)、鋼鐵防線(10MA/紅K低)、極限停損(60MA)")
+    st.caption(f"⚡ 盤中即時引擎已開啟（自動剔除價跌爆量長黑股）｜ 城堡點位：天花板(20日高/布林上軌/突破延伸+7%)、月線承接(20MA)、鋼鐵防線(10MA/紅K低)、極限停損(60MA)")
     
     st.markdown("#### 🔥 【表一：階段 3(3) 旱地拔蔥 ＆ 七大實戰名將點火榜】")
     if not df_launch.empty:
@@ -691,7 +895,7 @@ with tab2:
 
 with tab3:
     st.markdown("#### 🏛️ 【長期投資波段區：週K守10週線 ＋ 日線站穩月季線 ＋ 月營收正成長旗艦榜】")
-    st.caption("篩選基準：嚴守模組 2 與模組 3「長線保護短線」原則（站穩 10 週均線、現價 >= 20MA >= 60MA、月營收 YoY > 0、並標註集保 400張大戶比例）")
+    st.caption("篩選基準：嚴守模組 2 與模組 3「長線保護短線」原則（站穩 10 週均線、現價 >= 20MA >= 60MA、月營收 YoY > 0、排除當日爆量重挫股）")
     if not df_long.empty:
         st.dataframe(df_long, use_container_width=True, hide_index=True)
     else:
