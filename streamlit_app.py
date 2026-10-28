@@ -13,7 +13,7 @@ import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(
-    page_title="台股每日戰情室 v35.0",
+    page_title="台股每日戰情室 v36.0",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -25,13 +25,6 @@ st.set_page_config(
 def get_tw_now():
     tz = pytz.timezone("Asia/Taipei")
     return datetime.datetime.now(tz)
-
-def is_market_open():
-    now = get_tw_now()
-    if now.weekday() >= 5:
-        return False
-    t_val = now.hour * 60 + now.minute
-    return (9 * 60) <= t_val <= (13 * 60 + 35)
 
 def get_volume_multiplier():
     now = get_tw_now()
@@ -86,7 +79,6 @@ def parse_mis_price(item, is_index=False):
         if a_val and a_val > 0:
             return a_val
 
-    # 若為大盤指數且當秒 z 為 '-'，暫回傳 None 交由 Yahoo v8 1分K 即時流補位，避免誤回傳昨收 y
     if is_index:
         return None
 
@@ -94,7 +86,6 @@ def parse_mis_price(item, is_index=False):
     return y_val if (y_val and y_val > 0) else None
 
 def fetch_yahoo_v8_realtime(ticker_symbol):
-    """直接呼叫 Yahoo Finance v8 Chart API (1m 級別)，取得零延遲之開盤/最高/最低/現價/昨收"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -206,14 +197,12 @@ def fetch_mis_realtime_batch(code_market_tuples):
         except Exception:
             continue
 
-    # 雙源對時校正：針對大盤 (t00)、00631L、0050 同步查詢 Yahoo v8 1m API，若 MIS 因 z='-' 缺漏或延遲則自動補位
     for code_key, yf_sym in [("t00", "%5ETWII"), ("00631L", "00631L.TW"), ("0050", "0050.TW")]:
         yv8 = fetch_yahoo_v8_realtime(yf_sym)
         if yv8 and yv8["close"] > 0:
             if code_key not in rt_dict:
                 rt_dict[code_key] = yv8
             else:
-                # 若 MIS 的開盤價遺失，補上開盤價；若 Yahoo 時間較新或 MIS 卡在昨收，則採用最新報價
                 if rt_dict[code_key].get("open", 0) <= 0:
                     rt_dict[code_key]["open"] = yv8["open"]
                 if abs(rt_dict[code_key]["close"] - rt_dict[code_key]["prev_close"]) < 0.01 and abs(yv8["close"] - yv8["prev_close"]) > 0.01:
@@ -380,7 +369,6 @@ CORE_WATCHLIST = {
 # 模組 5：多週期 KDJ ＋ 威爾德 DMI(14) 雙指標共振演算核心
 # ==========================================
 def compute_kdj(highs, lows, closes, n=9):
-    """計算 K9, D9, J9 以及前一日 K9_prev, D9_prev, J9_prev (判斷 KD 金叉與 J 值勾頭)"""
     k_val, d_val = 50.0, 50.0
     k_prev, d_prev, j_prev = 50.0, 50.0, 50.0
     j_val = 50.0
@@ -397,10 +385,6 @@ def compute_kdj(highs, lows, closes, n=9):
     return round(k_val, 1), round(d_val, 1), round(j_val, 1), round(j_prev, 1), kd_cross_recent
 
 def compute_dmi(highs, lows, closes, n=14):
-    """
-    計算 J. Welles Wilder 標準 14 週期 DMI 指標：
-    回傳 +DI(14), -DI(14), ADX(14), ADX_prev, 以及是否處於「+DI > -DI 且 ADX 由下往上」之多頭共振態
-    """
     if len(closes) < n + 5:
         return 25.0, 25.0, 20.0, 20.0, False
 
@@ -419,7 +403,6 @@ def compute_dmi(highs, lows, closes, n=14):
     tr3 = (l - c.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    # Wilder's RMA 平滑 (alpha = 1 / n)
     atr = tr.ewm(alpha=1.0/n, adjust=False).mean()
     plus_di = 100.0 * pd.Series(plus_dm).ewm(alpha=1.0/n, adjust=False).mean() / atr.replace(0, np.nan)
     minus_di = 100.0 * pd.Series(minus_dm).ewm(alpha=1.0/n, adjust=False).mean() / atr.replace(0, np.nan)
@@ -435,7 +418,6 @@ def compute_dmi(highs, lows, closes, n=14):
     adx_now = round(float(adx.iloc[-1]), 1)
     adx_prev = round(float(adx.iloc[-2]), 1) if len(adx) > 1 else adx_now
 
-    # 判定 DMI 黃金交叉或強勢多頭且 ADX 由下往上勾頭
     dmi_bull_active = (pdi_now > mdi_now) and (adx_now > adx_prev) and ((pdi_prev <= mdi_prev + 4.0) or (pdi_now - mdi_now > pdi_prev - mdi_prev))
     return pdi_now, mdi_now, adx_now, adx_prev, bool(dmi_bull_active)
 
@@ -477,7 +459,7 @@ def fetch_and_analyze_fleet(rt_quotes):
     data_60m = download_fleet_60m()
     today_str = get_tw_now().strftime("%Y-%m-%d")
 
-    twii_now = twii_official["close"] if twii_official["close"] > 0 else 46707.5
+    twii_now = twii_official["close"] if twii_official["close"] > 0 else 46807.0
     twii_chg_pct = twii_official["chg_pct"]
     twii_open = twii_now
     twii_high = twii_now
@@ -492,21 +474,21 @@ def fetch_and_analyze_fleet(rt_quotes):
     m_ma5 = round(twii_now * 0.985, 1)
     bb_upper = round(twii_now * 1.06, 1)
     bb_lower = round(twii_now * 0.97, 1)
-    k9, d9, j9, j9_prev, kd_cross_d = 18.3, 18.9, 17.0, 6.1, False
-    pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = 20.0, 25.0, 22.0, 21.0, False
+    k9, d9, j9, j9_prev, kd_cross_d = 19.3, 19.3, 19.3, -1.9, True
+    pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = 18.8, 27.2, 23.5, 24.6, False
     macd_hist = -300.0
     date_str = today_str
     quote_src = "Yahoo Finance / 證交所"
 
-    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 55.5, 37.5, 91.3, 71.0, True
-    k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = 28.0, 18.0, 25.0, 22.0, True
+    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 66.5, 47.2, 105.1, 91.0, True
+    k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = 31.5, 20.9, 24.9, 22.0, True
     k60_ma5, k60_ma20, k60_ma60 = twii_now, twii_now, twii_now
     k60_macd_osc = 10.0
     k60_is_red_bar = True
 
-    p_2x = price_dict.get("00631L", {}).get("close", 36.53)
+    p_2x = price_dict.get("00631L", {}).get("close", 36.70)
     p_2x_chg = price_dict.get("00631L", {}).get("chg_pct", 0.0)
-    p_1x = price_dict.get("0050", {}).get("close", 108.03)
+    p_1x = price_dict.get("0050", {}).get("close", 108.20)
     p_1x_chg = price_dict.get("0050", {}).get("chg_pct", 0.0)
 
     try:
@@ -640,12 +622,33 @@ def scan_all_stocks():
     vol_mult, vol_note = get_volume_multiplier()
     today_str = get_tw_now().strftime("%Y-%m-%d")
 
+    # ==========================================
+    # v36.0 雙軌分流候選池：
+    # 軌道 A (短線純技術動能池)：不看營收YoY，只要當日帶量強攻即納入
+    # 軌道 B (長線基本＋籌碼池)：不管今日漲跌，只要月營收YoY>=15% 且 大戶>=50% 即納入
+    # ==========================================
     candidates = dict(CORE_WATCHLIST)
+
+    # 軌道 A：全市場短線純技術帶量突破股 (最多納 35 檔)
+    short_added = 0
     for code, info in price_dict.items():
-        if code not in candidates and len(code) == 4 and info["vol_lots"] >= 2500 and info["chg_pct"] >= 3.0 and info["close"] >= 25.0:
-            candidates[code] = (info["name"], "全市場動態破繭", info["market"])
-            if len(candidates) >= 75:
+        if code not in candidates and len(code) == 4 and info["vol_lots"] >= 1800 and info["chg_pct"] >= 2.5 and info["close"] >= 20.0:
+            candidates[code] = (info["name"], "短線技術破繭", info["market"])
+            short_added += 1
+            if short_added >= 35:
                 break
+
+    # 軌道 B：全市場長線基本面＋大戶鎖碼績優股 (最多納 30 檔)
+    long_added = 0
+    for code, info in price_dict.items():
+        if code not in candidates and len(code) == 4 and info["vol_lots"] >= 800 and info["close"] >= 30.0:
+            yoy_v = rev_dict.get(code, 0.0)
+            tdcc_v = tdcc_dict.get(code, 0.0)
+            if yoy_v >= 15.0 and tdcc_v >= 50.0:
+                candidates[code] = (info["name"], "長線績優鎖碼", info["market"])
+                long_added += 1
+                if long_added >= 30:
+                    break
 
     mis_targets = [("00631L", "TW"), ("0050", "TW")] + [(c, m) for c, (_, _, m) in candidates.items()]
     rt_quotes = fetch_mis_realtime_batch(tuple(mis_targets))
@@ -720,7 +723,6 @@ def scan_all_stocks():
             prev_ma20 = float(np.mean(c[-21:-1]))
             ma_tangle_pct = round((max(prev_ma5, prev_ma10, prev_ma20) - min(prev_ma5, prev_ma10, prev_ma20)) / prev_ma20 * 100, 2)
 
-            # 計算 KDJ 與 Wilder DMI(14)
             stk_k9, stk_d9, stk_j9, stk_j_prev, kd_cross_recent = compute_kdj(h[-60:], l[-60:], c[-60:])
             pdi, mdi, adx, adx_prev, dmi_bull_active = compute_dmi(h[-90:], l[-90:], c[-90:])
             adx_delta = round(adx - adx_prev, 1)
@@ -728,7 +730,6 @@ def scan_all_stocks():
             dmi_str = f"+DI:{pdi} > -DI:{mdi}" if pdi > mdi else f"+DI:{pdi} < -DI:{mdi}"
             adx_str = f"{adx} ({'↑轉強' if adx_up else '↓整理'}{adx_delta:+.1f})"
 
-            # 文件一核心邏輯：KD × DMI 雙金叉共振且 ADX 由下往上 (排除 ADX < 18 死水盤)
             kd_dmi_resonance = (stk_k9 >= stk_d9) and (pdi > mdi) and adx_up and (adx >= 18.0) and (kd_cross_recent or dmi_bull_active)
 
             _, _, osc = compute_macd(c)
@@ -774,47 +775,50 @@ def scan_all_stocks():
                 "月營收YoY": yoy_str
             }
 
-            rev_ok = (yoy_val is None) or (yoy_val > 0)
             is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
 
-            if curr_p >= ma20 and ma20 >= ma60 * 0.98 and rev_ok and (not is_heavy_dump):
-                # 若具備 KD×DMI 共振且 ADX 向上，容許 J 值到 93；否則 J>=90 或 3日>=10% 視為過熱
+            # ==========================================
+            # ⚡ 分頁二：短線操作精選區（純粹看技術面與量能，完全不綁定月營收 YoY！）
+            # ==========================================
+            if curr_p >= ma20 and (curr_p >= ma60 or ma20 >= ma60 * 0.96) and (not is_heavy_dump):
                 is_overheated = (chg_3d >= 10.5) or (stk_j9 >= 90.0 and not kd_dmi_resonance)
+                fund_badge = "🔥雙渦輪" if (yoy_val and yoy_val > 0) else "⚡純技術題材"
 
-                # 表一：剛起漲點火榜 (整合文件一：KD×DMI 雙金叉共振且 ADX 向上 + 量比 >= 1.2)
-                if (chg_1d >= 1.5 and vol_ratio >= 1.20 and kd_dmi_resonance and not is_overheated) or (chg_1d >= 2.0 and vol_ratio >= 1.35 and not is_overheated and adx >= 16.0):
+                # 表一：剛起漲點火榜 (純技術突破 + KD×DMI 共振)
+                if (chg_1d >= 1.5 and vol_ratio >= 1.20 and kd_dmi_resonance and not is_overheated) or (chg_1d >= 2.0 and vol_ratio >= 1.35 and not is_overheated and pdi > mdi and adx >= 16.0):
                     score = 85 + int(min(12, vol_ratio * 2.5 + chg_1d))
                     if kd_dmi_resonance:
-                        pattern = "👑 KD×DMI雙金叉共振：+DI穿-DI且ADX向上噴出"
+                        pattern = f"👑 KD×DMI雙金叉共振(ADX↑) [{fund_badge}]"
                         score = 100
                     elif ma_tangle_pct <= 3.5:
-                        pattern = "🌸 瑞昱/矽創型：均線糾結後帶量長紅突破"
+                        pattern = f"🌸 瑞昱/矽創型：均線糾結帶量突破 [{fund_badge}]"
                         score += 3
                     elif osc[-1] > osc[-2] and osc[-2] < 0:
-                        pattern = "💎 智原型：MACD綠柱收斂翻紅帶量上攻"
+                        pattern = f"💎 智原型：MACD綠柱收斂翻紅上攻 [{fund_badge}]"
                         score += 2
                     elif bb_bw <= 14.0 and curr_p >= ma20:
-                        pattern = "🔥 雙鴻/奇鋐型：布林壓縮旱地拔蔥點火"
+                        pattern = f"🔥 雙鴻/奇鋐型：布林壓縮旱地拔蔥 [{fund_badge}]"
                         score += 2
                     else:
-                        pattern = "🚀 嘉澤/信驊型：多頭帶量突破頸線表態"
+                        pattern = f"🚀 嘉澤/信驊型：多頭帶量突破頸線 [{fund_badge}]"
                     r1 = {"實戰優先分": min(100, score), "名將戰法診斷": pattern, **row_base}
                     list_tab2_launch.append(r1)
 
-                # 表二：N字量縮回測低接榜 (優先挑選出 DMI 仍維持 +DI > -DI 多頭結構之量縮洗盤股)
-                elif (-3.8 <= chg_1d <= 2.2) and (vol_ratio <= 0.90) and (curr_p >= ma20) and (stk_j9 <= 68.0):
+                # 表二：N字量縮回測低接榜 (純技術量縮守 10/20MA 且 J<=68)
+                elif (-3.8 <= chg_1d <= 2.2) and (vol_ratio <= 0.90) and (curr_p >= ma20) and (stk_j9 <= 68.0) and (pdi >= mdi * 0.9):
                     score = 84 + int((1.0 - vol_ratio) * 15)
                     if pdi > mdi:
                         score += 3
-                        pattern = "⚡ 神準/台光電型：N字量縮回測守月線(DMI多方控盤)"
+                        pattern = f"⚡ 神準/台光電型：N字量縮守月線(DMI多方) [{fund_badge}]"
                     else:
-                        pattern = "⚡ 神準/台光電型：N字量縮回測10/20MA有守(J值已冷卻)"
+                        pattern = f"⚡ 神準/台光電型：N字量縮守10/20MA(J冷卻) [{fund_badge}]"
                     r2 = {"蓄勢評分": min(99, score), "名將戰法診斷": pattern, **row_base}
                     list_tab2_pullback.append(r2)
 
+                # 表三：上升軌道推升 & KD鈍化續強 / 3日急拉警戒榜
                 elif curr_p >= ma5 >= ma10 >= ma20 and chg_1d >= -2.0:
                     if chg_3d >= 10.5:
-                        pattern = "🔥 3日急拉過熱(3日>=10%)：切勿追高・分批鎖利"
+                        pattern = "🔥 3日急拉過熱(3日>=10.5%)：切勿追高・分批鎖利"
                     elif stk_j9 >= 90.0 and pdi > mdi and adx_up:
                         pattern = "🚀 KD鈍化惟DMI+ADX向上：主升段續抱・勿過早下車"
                     elif stk_j9 >= 90.0 or curr_p >= bb_up:
@@ -824,30 +828,37 @@ def scan_all_stocks():
                     r3 = {"趨勢狀態": pattern, **row_base}
                     list_tab2_orbit.append(r3)
 
-            # 分頁三：長期投資波段區 (加入 DMI +DI > -DI 與 ADX 趨勢加分)
-            tdcc_ok = (tdcc_val is None) or (tdcc_val >= 40.0) or (code in CORE_WATCHLIST)
-            if curr_p >= ma20 and ma20 >= ma60 and w_bull and rev_ok and tdcc_ok and (not is_heavy_dump):
-                l_score = 84
-                if code in CORE_WATCHLIST:
-                    l_score += 3
-                if pdi > mdi and adx >= 20.0 and adx_up:
-                    l_score += 5
-                if yoy_val and yoy_val >= 15.0:
-                    l_score += 5
-                elif yoy_val and yoy_val > 0:
-                    l_score += 3
-                if tdcc_val and tdcc_val >= 60.0:
-                    l_score += 5
-                elif tdcc_val and tdcc_val >= 45.0:
-                    l_score += 3
+            # ==========================================
+            # 🏛️ 分頁三：長期投資波段區（嚴格要求：基本面 YoY>=10% ＋ 大戶>=48% ＋ 技術面 DMI 多方且未過熱）
+            # 徹底與短線急拉股分流！
+            # ==========================================
+            long_rev_ok = (yoy_val is not None) and (yoy_val >= 10.0)
+            long_tdcc_ok = (tdcc_val is not None and tdcc_val >= 48.0) or (code in CORE_WATCHLIST and (tdcc_val is None or tdcc_val >= 40.0))
+            long_tech_ok = (curr_p >= ma20) and (ma20 >= ma60) and w_bull and (pdi > mdi)
+            # 排除短線已經 3日急拉>=9% 或 J>=88 或 月線乖離>16% 的短線噴出股，確保長線買在穩健波段位階
+            long_position_safe = (chg_3d < 9.0) and (stk_j9 <= 88.0) and (bias_ma20_pct <= 16.0)
 
-                if bias_ma20_pct >= 20.0 or (stk_j9 >= 92.0 and not adx_up):
-                    l_score -= 8
-                    long_status = f"⚠️ 週月多頭惟短線乖離偏大(+{bias_ma20_pct}%)・宜等回測月線"
-                elif kd_dmi_resonance:
-                    long_status = "👑 週月多頭＋日KD×DMI雙金叉共振 (波段主升段)"
+            if long_rev_ok and long_tdcc_ok and long_tech_ok and long_position_safe and (not is_heavy_dump):
+                l_score = 85
+                if yoy_val >= 25.0:
+                    l_score += 5
+                elif yoy_val >= 10.0:
+                    l_score += 3
+                if tdcc_val and tdcc_val >= 65.0:
+                    l_score += 5
+                elif tdcc_val and tdcc_val >= 50.0:
+                    l_score += 3
+                if adx >= 20.0 and adx_up:
+                    l_score += 4
+                if ma60 >= ma120:
+                    l_score += 2
+
+                if kd_dmi_resonance:
+                    long_status = "👑 基本面高成長＋大戶鎖碼＋KD×DMI共振起漲"
+                elif vol_ratio <= 0.90:
+                    long_status = "💎 基本面高成長＋大戶鎖碼＋量縮守月線甜美區"
                 else:
-                    long_status = "✅ 週K守10週線＋站穩月季線＋基本面有基"
+                    long_status = "✅ 週K守10週線＋DMI多方控盤＋營收/大戶雙優"
 
                 r_long = {
                     "波段總分": min(100, l_score),
@@ -867,10 +878,10 @@ def scan_all_stocks():
     return df_t1, df_t2, df_t3, df_long, vol_note, rt_quotes
 
 # ==========================================
-# 模組 6：Streamlit 戰情室主介面 (v35.0 KD×DMI 共振 ＋ 雙源即時對時版)
+# 模組 6：Streamlit 戰情室主介面 (v36.0 短長線雙軌分流版)
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🏛️ 台股每日戰情室 v35.0 (KD × DMI 雙金叉共振 ＋ 60分K/日K 雙源即時版)")
+st.markdown("## 🏛️ 台股每日戰情室 v36.0 (短線純技術動能 vs. 長線基本技術雙優・雙軌分流版)")
 
 with st.expander("⚙️ 點此展開／調整【0050正2 ＋ 0050 母子艦隊持倉與成本參數】", expanded=False):
     c_in1, c_in2, c_in3, c_in4, c_in5 = st.columns(5)
@@ -895,7 +906,7 @@ with btn_col2:
 with btn_col3:
     auto_refresh = st.checkbox("⏱️ 開啟盤中每 20 秒自動刷新即時報價", value=False)
 
-with st.spinner("📡 正在同步證交所 MIS ＆ Yahoo v8 即時行情、大盤 60分K/日K KDJ 與 Wilder DMI(14)..."):
+with st.spinner("📡 正在同步證交所 MIS ＆ Yahoo v8 即時行情、執行【短線純技術 vs 長線基本技術雙優】雙軌掃描..."):
     df_launch, df_pullback, df_orbit, df_long, vol_note, rt_quotes = scan_all_stocks()
     fleet = fetch_and_analyze_fleet(rt_quotes)
 
@@ -948,7 +959,6 @@ t_ma60_buf = calc_target_2x(twii_ma60_buffer)
 t_ma60 = calc_target_2x(twii_ma60)
 t_m_ma5 = calc_target_2x(twii_m_ma5)
 t_ma240 = calc_target_2x(twii_ma240)
-t_60m_ma20 = calc_target_2x(fleet["k60_ma20"])
 
 t1x_harvest = calc_target_1x(twii_harvest_zone)
 t1x_ma20 = calc_target_1x(twii_ma20)
@@ -978,27 +988,26 @@ k60_adx = fleet["k60_adx"]
 k60_adx_delta = round(k60_adx - fleet["k60_adx_prev"], 1)
 dmi_60_str = f"+DI={k60_pdi} / -DI={k60_mdi} / ADX={k60_adx}({'↑' if k60_adx_delta > 0 else '↓'})"
 
-# 修正見頂判定：必須 60分J >= 75 且「開始向下彎頭 (k60_j_delta < 0)」且接近反壓才算見頂；若持續向上則為強勢推進
 k60_bottom_turned_up = (k60_j_delta > 0 and (twii_now >= fleet["k60_ma5"] or fleet["k60_is_red_bar"])) or (k60_k >= k60_d and k60_j_delta >= 0)
 k60_overheated_peaking = (k60_j >= 75.0 and k60_j_delta < 0) and (twii_now >= twii_w_ma10 * 0.993)
 
 def build_ai_snapshot_text():
     lines = [
-        f"【台股每日戰情室 v35.0 KD×DMI共振數據包】({now_str})",
-        f"1. 大盤即時報價与位階：現價 {twii_now:,.1f}點 ({fleet['twii_chg_pct']:+.2f}% | 開盤 {twii_open:,.1f} / 最高 {fleet['twii_high']:,.1f} / 最低 {fleet['twii_low']:,.1f} / 昨收 {twii_prev_c:,.1f}) | 日20MA月線 {twii_ma20:,.1f} ({fleet['bias_20']:+.2f}%) | 日60MA季線 {twii_ma60:,.1f} ({fleet['bias_60']:+.2f}%) | 10週線 {twii_w_ma10:,.1f} | 5月線 {twii_m_ma5:,.1f}",
+        f"【台股每日戰情室 v36.0 短長線雙軌分流數據包】({now_str})",
+        f"1. 大盤即時報價與位階：現價 {twii_now:,.1f}點 ({fleet['twii_chg_pct']:+.2f}% | 開盤 {twii_open:,.1f} / 最高 {fleet['twii_high']:,.1f} / 最低 {fleet['twii_low']:,.1f} / 昨收 {twii_prev_c:,.1f}) | 日20MA月線 {twii_ma20:,.1f} ({fleet['bias_20']:+.2f}%) | 日60MA季線 {twii_ma60:,.1f} ({fleet['bias_60']:+.2f}%) | 10週線 {twii_w_ma10:,.1f} | 5月線 {twii_m_ma5:,.1f}",
         f"2. 大盤日K與60分K (KDJ + DMI)：『日K』K={fleet['k9']}/D={fleet['d9']}/J={j_now}({j_trend_str}), DMI({dmi_d_str}) ｜ 『60分K』60m_K={k60_k}/60m_D={k60_d}/60m_J={k60_j}({k60_j_trend}), 60m_DMI({dmi_60_str}), 60分5MA={fleet['k60_ma5']:,.1f}",
         f"3. 母子艦隊現況：0050正2(00631L) 現價 {p_2x:.2f}元 ({fleet['p_2x_chg']:+.2f}%), 持有 {in_lots_2x:.2f}張, 市值 {val_2x:,}元(損益 {pnl_2x:+,}元/{pnl_2x_pct:+.2f}%) | 0050 現價 {p_1x:.2f}元 ({fleet['p_1x_chg']:+.2f}%), 持有 {in_lots_1x:.2f}張, 市值 {val_1x:,}元(損益 {pnl_1x:+,}元/{pnl_1x_pct:+.2f}%) | 總市值 {total_fleet_val:,}元 (總損益 {total_pnl:+,}元/{total_pnl_pct:+.2f}%)",
         f"4. 0050正2 對應目標價：高檔收割區={t_harvest:.2f}元 | 日20MA月線={t_ma20:.2f}元 | 10週線反壓={t_w_ma10:.2f}元 | 日60MA季線={t_ma60:.2f}元 | 5月線防線={t_m_ma5:.2f}元"
     ]
     if not df_launch.empty:
-        top_l = [f"{r['代碼']}{r['股名']}({r['名將戰法診斷'][:8]}/現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']}/ADX{r['ADX強度']}/YoY{r['月營收YoY']})" for _, r in df_launch.head(8).iterrows()]
-        lines.append("5. 表一(KD×DMI共振與旱地拔蔥榜)：" + "；".join(top_l))
+        top_l = [f"{r['代碼']}{r['股名']}({r['名將戰法診斷'][:10]}/現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']}/ADX{r['ADX強度']}/防線{r['鋼鐵防線']})" for _, r in df_launch.head(8).iterrows()]
+        lines.append("5. 表一(短線純技術：KD×DMI共振與旱地拔蔥榜)：" + "；".join(top_l))
     if not df_pullback.empty:
-        top_p = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']}/月線{r['月線承接']}/YoY{r['月營收YoY']})" for _, r in df_pullback.head(8).iterrows()]
-        lines.append("6. 表二(N字量縮回測低接榜)：" + "；".join(top_p))
+        top_p = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']}/月線{r['月線承接']})" for _, r in df_pullback.head(8).iterrows()]
+        lines.append("6. 表二(短線純技術：N字量縮回測低接榜)：" + "；".join(top_p))
     if not df_long.empty:
-        top_g = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/{r['DMI多空']}/ADX{r['ADX強度']}/大戶{r['400張大戶%']}/YoY{r['月營收YoY']})" for _, r in df_long.head(8).iterrows()]
-        lines.append("7. 分頁三(長線雙守有基榜)：" + "；".join(top_g))
+        top_g = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/J值{r['日J值']}/{r['DMI多空']}/ADX{r['ADX強度']}/大戶{r['400張大戶%']}/YoY{r['月營收YoY']})" for _, r in df_long.head(8).iterrows()]
+        lines.append("7. 分頁三(長線基本+籌碼+技術雙優旗艦榜)：" + "；".join(top_g))
     return "\n".join(lines)
 
 with st.expander("🤖 點此展開【Gemini AI 專屬戰情數據包】（點擊右上角 📋 圖示即可一鍵複製貼給 Gemini 分析，免截圖！）", expanded=False):
@@ -1006,8 +1015,8 @@ with st.expander("🤖 點此展開【Gemini AI 專屬戰情數據包】（點�
 
 tab1, tab2, tab3 = st.tabs([
     "📊 0050正2 ＋ 0050 母子艦隊戰情室 (KDJ＋DMI 雙週期共振)",
-    "⚡ 短線操作精選區 (KD×DMI 雙金叉共振 ＆ 七大實戰名將)",
-    "🏛️ 長期投資波段區 (雙守有基)"
+    "⚡ 短線操作精選區 (純看技術面與量能・KD×DMI 共振)",
+    "🏛️ 長期投資波段區 (基本面YoY>=10% ＋ 大戶>=48% ＋ 技術面雙優)"
 ])
 
 with tab1:
@@ -1098,7 +1107,7 @@ with tab1:
         st.success(
             f"🟢 **【日K守季線戰區 ＋ 60分K (KDJ×DMI) 多頭推進：雙週期共振擊球／續抱訊號！】**\n\n"
             f"• **雙週期共振確認**：\n"
-            f"  1. **【日K戰區】**：大盤站回 **日60MA季線 (`{twii_ma60:,.0f} 點`)** 與 **5月線 (`{twii_m_ma5:,.0f} 點`)** 之上，日KDJ (`K={fleet['k9']}/D={fleet['d9']}/J={j_now} {j_trend_str}`) 低檔勾頭準備金叉！\n"
+            f"  1. **【日K戰區】**：大盤站回 **日60MA季線 (`{twii_ma60:,.0f} 點`)** 與 **5月線 (`{twii_m_ma5:,.0f} 點`)** 之上，日KDJ (`K={fleet['k9']}/D={fleet['d9']}/J={j_now} {j_trend_str}`) 低檔勾頭金叉！\n"
             f"  2. **【60分K動能】**：**60分KDJ (`K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}`) 與 60分DMI (`{dmi_60_str}`) 同步多頭向上**，即使 60分J 進入高檔仍屬強勢鈍化推進，非見頂訊號！\n"
             f"• **實戰行動**：母子艦隊安心續抱（或於季線 `{t_ma60:.2f} 元` 附近維持偏多配置）！第一道反彈目標看 **10週線 (`{twii_w_ma10:,.0f}點` / 正2約 `{t_w_ma10:.2f}元`)**，第二道看 **日20MA月線 (`{twii_ma20:,.0f}點` / 正2約 `{t_ma20:.2f}元`)**；直到 60分J 在反壓區正式向下彎頭死叉才收割短差！"
         )
@@ -1137,7 +1146,7 @@ with tab1:
         {
             "雙週期實戰錨點": "🎯 階段3：季線攻防戰區 (日60MA季線 ±1.5%)",
             "日K戰區點位": f"{twii_ma60:,.1f} 點 (前哨 {twii_ma60_buffer:,.0f})",
-            "60分K 扣扳機條件": f"站穩季線 ＋ 60分KDJ金叉且60分DMI(+DI>-DI)多頭推進",
+            "60分K 扣扳機條件": "站穩季線 ＋ 60分KDJ金叉且60分DMI(+DI>-DI)多頭推進",
             "0050正2 目標價": f"{t_ma60:,.2f} ~ {t_ma60_buf:,.2f} 元",
             "實戰指令與滾股試算": f"高檔賣1張於此買回變 {shares_at_ma60:,} 股 (+{shares_at_ma60 - 1000}股)"
         },
@@ -1196,19 +1205,19 @@ with tab1:
     st.dataframe(df_switch_modes, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.caption("⚡ 已全面導入【Wilder DMI(14) × KD 雙金叉共振且 ADX 由下往上】選股濾網（自動過濾 ADX<18 死水盤整股）")
+    st.caption("⚡ 【短線純技術動能模式】不限制月營收 YoY！純粹鎖定「KD×DMI 雙金叉共振(ADX↑)、帶量突破、N字量縮回測」之強勢股，嚴守鋼鐵防線停損停利。")
     
-    st.markdown("#### 🔥 【表一：👑 KD×DMI 雙金叉共振(ADX↑) ＆ 階段 3(3) 旱地拔蔥剛起漲點火榜】")
+    st.markdown("#### 🔥 【表一：👑 KD×DMI 雙金叉共振(ADX↑) ＆ 階段 3(3) 旱地拔蔥純技術點火榜】")
     if not df_launch.empty:
         st.dataframe(df_launch, use_container_width=True, hide_index=True)
     else:
-        st.info("今日盤面暫無符合「KD×DMI共振 或 帶量突破未過熱 ＋ 營收正成長」之剛起漲標的，請保持耐心切勿追高。")
+        st.info("今日盤面暫無符合「KD×DMI共振 或 帶量突破未過熱」之短線點火標的。")
 
-    st.markdown("#### 🎯 【表二：N字洗盤蓄勢 ＆ 拉回月線/十日線低接榜 (優先排序 DMI +DI>-DI 多方控盤股)】")
+    st.markdown("#### 🎯 【表二：N字洗盤蓄勢 ＆ 拉回月線/十日線低接榜 (純技術量縮守支撐・J<=68冷卻)】")
     if not df_pullback.empty:
         st.dataframe(df_pullback, use_container_width=True, hide_index=True)
     else:
-        st.info("今日暫無符合「量縮回測月線有守 ＋ J<=68冷卻 ＋ 營收正成長」之洗盤標的。")
+        st.info("今日暫無符合「量縮回測月線有守 ＋ J<=68冷卻」之短線洗盤標的。")
 
     st.markdown("#### 🛡️ 【表三：上升軌道推升 ＆ KD鈍化(DMI+ADX續強) / 3日急拉警戒榜】")
     if not df_orbit.empty:
@@ -1217,14 +1226,13 @@ with tab2:
         st.info("今日暫無符合多頭軌道推升之標的。")
 
 with tab3:
-    st.markdown("#### 🏛️ 【長期投資波段區：週K守10週線 ＋ 日線站穩月季線 ＋ DMI趨勢/月營收正成長旗艦榜】")
-    st.caption("篩選基準：嚴守模組 2 與模組 3「長線保護短線」原則（站穩 10 週均線、現價 >= 20MA >= 60MA、月營收 YoY > 0，並標註 DMI 多空與 ADX 趨勢強度）")
+    st.markdown("#### 🏛️ 【長期投資波段區：月營收 YoY>=10% ＋ 400張大戶>=48% ＋ 週月多頭/DMI多方控盤旗艦榜】")
+    st.caption("篩選基準：與短線飆股徹底分流！嚴格要求基本面高成長 (YoY>=10%)、大戶籌碼安定 (>=48%)、週K守10週線、日DMI (+DI>-DI) 且短線未過熱 (J<=88、3日<9%)。")
     if not df_long.empty:
         st.dataframe(df_long, use_container_width=True, hide_index=True)
     else:
-        st.info("目前無符合長線波段條件之標的。")
+        st.info("目前無同時符合「高營收成長 ＋ 大戶鎖碼 ＋ 技術面多頭未過熱」之長線波段標的。")
 
-# 盤中每 20 秒自動刷新引擎
 if auto_refresh:
     time.sleep(20)
     fetch_mis_realtime_batch.clear()
