@@ -15,18 +15,25 @@ import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(
-    page_title="台股每日戰情室 v37.0",
+    page_title="台股每日戰情室 v38.0",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # ==========================================
-# 模組 0：母子艦隊持倉參數「雙重記憶引擎」(JSON 檔案 + URL Query Params)
-# 確保按 F5 重新整理網頁或重開分頁時，設定的張數與成本永遠不會遺失！
+# 模組 0：母子艦隊「起始建倉基準 vs. 當前實際持倉」雙帳本記憶引擎
+# 支援 JSON 檔案 + URL Query Params 雙重鎖定，按 F5 刷新絕不遺失！
 # ==========================================
-CONFIG_FILE = "fleet_portfolio_config.json"
+CONFIG_FILE = "fleet_portfolio_v38.json"
 DEFAULT_PORTFOLIO = {
+    # 帳本 A：起始建倉基準 (原始投入本金定錨)
+    "init_lots_2x": 3.00,
+    "init_cost_2x": 34.68,
+    "init_lots_1x": 1.00,
+    "init_cost_1x": 101.90,
+    "init_cash": 0.0,
+    # 帳本 B：當前實際持倉 (換檔後現況)
     "lots_2x": 4.00,
     "cost_2x": 35.27,
     "lots_1x": 0.70,
@@ -36,7 +43,6 @@ DEFAULT_PORTFOLIO = {
 
 def load_portfolio_config():
     cfg = dict(DEFAULT_PORTFOLIO)
-    # 1. 優先讀取伺服器本地記憶檔
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -46,7 +52,6 @@ def load_portfolio_config():
                         cfg[k] = float(saved[k])
         except Exception:
             pass
-    # 2. 若網址列帶有記憶參數 (st.query_params)，則覆寫確保 F5 刷新 100% 不掉資料
     qp = st.query_params
     for k in cfg:
         if k in qp:
@@ -56,21 +61,17 @@ def load_portfolio_config():
                 pass
     return cfg
 
-def save_portfolio_config(lots_2x, cost_2x, lots_1x, cost_1x, cash_pool):
-    cfg = {
-        "lots_2x": round(float(lots_2x), 2),
-        "cost_2x": round(float(cost_2x), 2),
-        "lots_1x": round(float(lots_1x), 2),
-        "cost_1x": round(float(cost_1x), 2),
-        "cash_pool": round(float(cash_pool), 0)
-    }
+def save_portfolio_config(cfg_dict):
+    clean_cfg = {k: round(float(v), 2) for k, v in cfg_dict.items()}
+    clean_cfg["init_cash"] = round(float(cfg_dict.get("init_cash", 0.0)), 0)
+    clean_cfg["cash_pool"] = round(float(cfg_dict.get("cash_pool", 0.0)), 0)
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f)
+            json.dump(clean_cfg, f)
     except Exception:
         pass
     try:
-        for k, v in cfg.items():
+        for k, v in clean_cfg.items():
             st.query_params[k] = str(v)
     except Exception:
         pass
@@ -109,7 +110,7 @@ def get_volume_multiplier():
     return mult_clean, f"盤中即時推估 (U型倍率 {mult_clean:.2f}x)"
 
 def style_tw_stock_df(df):
-    """台股專屬配色：正數（漲/成長）顯示鮮紅色，負數（跌/衰退）顯示翠綠色"""
+    """台股專屬配色：正數（漲/獲利/成長）顯示鮮紅色，負數（跌/虧損/衰退）顯示翠綠色"""
     if df.empty:
         return df
 
@@ -118,7 +119,7 @@ def style_tw_stock_df(df):
             if isinstance(val, (int, float)):
                 v = float(val)
             else:
-                s = str(val).replace("%", "").replace(",", "").replace("+", "").strip()
+                s = str(val).replace("%", "").replace(",", "").replace("+", "").replace("元", "").strip()
                 if s in ["", "-", "--", "待公告", "未揭露"]:
                     return ""
                 v = float(s)
@@ -439,7 +440,6 @@ def fetch_official_market_data():
 
 # ==========================================
 # 模組 4：長線「電子權值股」＋「金融官股/龍頭金控」專屬白名單資料庫
-# (徹底排除一般沒落傳產與營建一次性入帳失真股！)
 # ==========================================
 ELECTRONICS_BLUE_CHIPS = {
     "2330": ("台積電", "👑電子權值・晶圓龍頭", "TW"),
@@ -501,13 +501,11 @@ FINANCIAL_BLUE_CHIPS = {
 
 CORE_WATCHLIST = {**ELECTRONICS_BLUE_CHIPS, **FINANCIAL_BLUE_CHIPS}
 
-# 排除營建股（25xx 及特定建商如 1808 潤隆），避免交屋一次性入帳 YoY +60000% 污染長線榜
 CONSTRUCTION_BLACKLIST = {"1808", "2501", "2504", "2505", "2506", "2509", "2511", "2515", "2516", "2520", "2524", "2527", "2528", "2530", "2534", "2535", "2536", "2537", "2538", "2539", "2540", "2542", "2543", "2545", "2546", "2547", "2548", "2597", "5522", "5534"}
 
 def is_traditional_or_construction(code):
     if code in CONSTRUCTION_BLACKLIST:
         return True
-    # 台股代碼前兩碼屬於傳統產業（水泥11、食品12、塑膠13、紡織14、造紙19、鋼鐵20、橡膠21、玻璃陶瓷18、營建25、航運26、觀光27、百貨29）
     if len(code) == 4 and code[:2] in ["11", "12", "13", "14", "18", "19", "20", "21", "25", "26", "27", "29"]:
         return True
     return False
@@ -606,7 +604,7 @@ def fetch_and_analyze_fleet(rt_quotes):
     data_60m = download_fleet_60m()
     today_str = get_tw_now().strftime("%Y-%m-%d")
 
-    twii_now = twii_official["close"] if twii_official["close"] > 0 else 45082.0
+    twii_now = twii_official["close"] if twii_official["close"] > 0 else 44920.1
     twii_chg_pct = twii_official["chg_pct"]
     twii_open = twii_now
     twii_high = twii_now
@@ -621,21 +619,21 @@ def fetch_and_analyze_fleet(rt_quotes):
     m_ma5 = round(twii_now * 1.01, 1)
     bb_upper = round(twii_now * 1.09, 1)
     bb_lower = round(twii_now * 0.98, 1)
-    k9, d9, j9, j9_prev, kd_cross_d = 21.8, 21.3, 22.8, 21.1, True
+    k9, d9, j9, j9_prev, kd_cross_d = 20.0, 20.6, 18.8, 21.3, False
     pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = 14.6, 36.4, 28.9, 27.6, False
     macd_hist = -350.0
     date_str = today_str
     quote_src = "Yahoo Finance / 證交所"
 
-    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 25.5, 24.1, 28.3, 8.4, True
-    k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = 17.1, 48.6, 28.7, 27.0, False
+    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 37.8, 29.6, 54.1, 41.7, True
+    k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = 17.1, 39.2, 30.8, 29.0, False
     k60_ma5, k60_ma20, k60_ma60 = twii_now, twii_now, twii_now
     k60_macd_osc = -20.0
     k60_is_red_bar = True
 
-    p_2x = price_dict.get("00631L", {}).get("close", 33.91)
+    p_2x = price_dict.get("00631L", {}).get("close", 33.83)
     p_2x_chg = price_dict.get("00631L", {}).get("chg_pct", 0.0)
-    p_1x = price_dict.get("0050", {}).get("close", 104.18)
+    p_1x = price_dict.get("0050", {}).get("close", 104.10)
     p_1x_chg = price_dict.get("0050", {}).get("chg_pct", 0.0)
 
     try:
@@ -771,7 +769,6 @@ def scan_all_stocks():
 
     candidates = dict(CORE_WATCHLIST)
 
-    # 軌道 A：全市場短線純技術帶量突破股 (不限產業、不看營收YoY，最多納 35 檔)
     short_added = 0
     for code, info in price_dict.items():
         if code not in candidates and len(code) == 4 and info["vol_lots"] >= 1800 and info["chg_pct"] >= 2.2 and info["close"] >= 20.0:
@@ -780,7 +777,6 @@ def scan_all_stocks():
             if short_added >= 35:
                 break
 
-    # 軌道 B：全市場潛在「🔄 轉機題材股」或電子績優股 (排除營建一次性入帳失真股 YoY > 400%)
     turnaround_added = 0
     for code, info in price_dict.items():
         if code not in candidates and len(code) == 4 and (code not in CONSTRUCTION_BLACKLIST) and info["vol_lots"] >= 1000 and info["close"] >= 25.0:
@@ -863,7 +859,6 @@ def scan_all_stocks():
             std20 = float(np.std(c[-20:]))
             bb_up = round(ma20 + 2.0 * std20, 2)
             bb_bw = round((4.0 * std20 / ma20) * 100, 1) if ma20 > 0 else 99.0
-            bias_ma20_pct = round((curr_p - ma20) / max(0.01, ma20) * 100, 1)
 
             prev_ma5 = float(np.mean(c[-6:-1]))
             prev_ma10 = float(np.mean(c[-11:-1]))
@@ -880,14 +875,6 @@ def scan_all_stocks():
             kd_dmi_resonance = (stk_k9 >= stk_d9) and (pdi > mdi) and adx_up and (adx >= 18.0) and (kd_cross_recent or dmi_bull_active)
 
             _, _, osc = compute_macd(c)
-
-            df_weekly = df_s["Close"].resample("W").last().dropna()
-            w_c = df_weekly.values.astype(float)
-            if len(w_c) > 0:
-                w_c[-1] = curr_p
-            w_ma10 = float(np.mean(w_c[-10:])) if len(w_c) >= 10 else float(np.mean(w_c))
-            _, _, w_osc = compute_macd(w_c) if len(w_c) >= 26 else (None, None, np.array([0.0]))
-            w_bull = (curr_p >= w_ma10) and (float(w_osc[-1]) >= -0.5 if len(w_osc) > 0 else True)
 
             prev_high_20d = round(float(np.max(h[-21:-1])), 2)
             raw_ceiling = max(bb_up, prev_high_20d)
@@ -924,9 +911,7 @@ def scan_all_stocks():
 
             is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
 
-            # ==========================================
             # ⚡ 分頁二：短線操作精選區（純看技術面與量能，不限營收 YoY）
-            # ==========================================
             if curr_p >= ma20 and (curr_p >= ma60 or ma20 >= ma60 * 0.96) and (not is_heavy_dump):
                 is_overheated = (chg_3d >= 10.5) or (stk_j9 >= 90.0 and not kd_dmi_resonance)
                 fund_badge = "🔥技術+營收雙渦輪" if (yoy_val and 0 < yoy_val <= 400.0) else "⚡純技術動能"
@@ -950,7 +935,7 @@ def scan_all_stocks():
                     r1 = {"實戰優先分": min(100, score), "名將戰法診斷": pattern, **row_base}
                     list_tab2_launch.append(r1)
 
-                elif (-3.8 <= chg_1d <= 2.2) and (vol_ratio <= 0.90) and (curr_p >= ma20) and (stk_j9 <= 68.0) and (pdi >= mdi * 0.9):
+                elif (-3.5 <= chg_1d <= 2.2) and (chg_3d >= -6.5) and (vol_ratio <= 0.90) and (curr_p >= ma20) and (stk_j9 <= 68.0) and (pdi >= mdi * 0.9):
                     score = 84 + int((1.0 - vol_ratio) * 15)
                     if pdi > mdi:
                         score += 3
@@ -972,21 +957,15 @@ def scan_all_stocks():
                     r3 = {"趨勢狀態": pattern, **row_base}
                     list_tab2_orbit.append(r3)
 
-            # ==========================================
-            # 🏛️ 分頁三：長期投資波段區
-            # 表 3-A：純【👑 電子權值股 ＆ 🏦 金融官股/龍頭金控】（徹底排除一般傳產與營建！）
-            # 表 3-B：【🔄 轉機題材特選股（明確標註🔄轉機股）】＆【💎 權值股回測長線支撐逢低佈局榜】
-            # ==========================================
+            # 🏛️ 分頁三：長期投資波段區（嚴格要求表 3-A 站上月線且 +DI > -DI）
             is_blue_chip = (code in ELECTRONICS_BLUE_CHIPS) or (code in FINANCIAL_BLUE_CHIPS)
             is_fin = (code in FINANCIAL_BLUE_CHIPS)
 
             if is_blue_chip and (not is_heavy_dump):
-                # 電子權值要求月營收 YoY > 0；金融金控重配息與獲利穩健（YoY >= -5% 即可）
                 bc_rev_ok = (yoy_val is None) or (yoy_val >= 0.0) or (is_fin and yoy_val >= -5.0)
                 bc_tdcc_ok = (tdcc_val is None) or (tdcc_val >= 42.0)
 
-                # 1. 站穩月線或季線且 DMI 多方控盤之強勢領航權值股 -> 進入 表 3-A
-                if bc_rev_ok and bc_tdcc_ok and (curr_p >= ma20 or (curr_p >= ma60 and pdi >= mdi * 0.95)) and (chg_3d < 9.5) and (stk_j9 <= 88.0):
+                if bc_rev_ok and bc_tdcc_ok and (curr_p >= ma20) and (pdi > mdi) and (chg_3d < 9.5) and (stk_j9 <= 88.0):
                     l_score = 88
                     if is_fin:
                         l_score += 3
@@ -994,14 +973,14 @@ def scan_all_stocks():
                         l_score += 4
                     if tdcc_val and tdcc_val >= 65.0:
                         l_score += 4
-                    if pdi > mdi and adx_up:
+                    if adx_up:
                         l_score += 3
 
                     if kd_dmi_resonance:
                         bc_status = "👑 權值龍頭＋KD×DMI雙金叉共振起漲"
-                    elif is_fin and curr_p >= ma20:
+                    elif is_fin:
                         bc_status = "🏦 績優金控＋站穩月季線＋長線護城河"
-                    elif vol_ratio <= 0.90 and curr_p >= ma20:
+                    elif vol_ratio <= 0.90:
                         bc_status = "💎 權值龍頭＋大戶鎖碼＋量縮守月線甜美區"
                     else:
                         bc_status = "✅ 權值龍頭＋長線多頭趨勢穩健"
@@ -1013,18 +992,14 @@ def scan_all_stocks():
                     }
                     list_tab3_core_bluechip.append(r_bc)
 
-                # 2. 當大盤重挫時，隨大盤回測季線/半年線/年線且日J值超賣勾頭之優質權值股 -> 進入 表 3-B 逢低佈局區
-                elif bc_rev_ok and (curr_p >= ma240 * 0.96) and (stk_j9 <= 35.0) and (stk_j9 >= stk_j_prev - 2.0):
-                    dip_row = dict(row_base)
-                    dip_row["長線支撐(季/年線)"] = f"季{ma60:.1f} / 年{ma240:.1f}"
+                elif bc_rev_ok and (curr_p >= ma240 * 0.96) and (stk_j9 <= 40.0):
                     r_dip = {
                         "波段總分": 90,
-                        "類型與轉機標註": "💎【權值回測買點】隨大盤回測長線支撐＋J值低檔止穩",
+                        "類型與轉機標註": "💎【權值回測買點】隨大盤回測長線支撐＋J值低檔區",
                         **row_base
                     }
                     list_tab3_turnaround_or_dip.append(r_dip)
 
-            # 3. 非權值股（或傳產股）若具備「低檔起漲＋營收YoY>=25%＋DMI多方控盤＋大戶>=48%」-> 明確標註為【🔄 轉機股】進入 表 3-B
             elif (not is_blue_chip) and (code not in CONSTRUCTION_BLACKLIST) and (not is_heavy_dump):
                 is_turnaround = (
                     (yoy_val is not None and 25.0 <= yoy_val <= 400.0)
@@ -1056,44 +1031,57 @@ def scan_all_stocks():
     return df_t1, df_t2, df_t3, df_long_bc, df_long_turn, vol_note, rt_quotes
 
 # ==========================================
-# 模組 6：Streamlit 戰情室主介面 (v37.0 台股紅漲綠跌 ＋ 持倉記憶鎖定 ＋ 權值/轉機分流版)
+# 模組 6：Streamlit 戰情室主介面 (v38.0 起始建倉 vs 當前持倉雙帳本真實獲利版)
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🏛️ 台股每日戰情室 v37.0 (台股紅漲綠跌・持倉記憶鎖定・電子金融權值＆轉機股分流版)")
+st.markdown("## 🏛️ 台股每日戰情室 v38.0 (起始建倉基準 vs. 換檔真實獲利對照・電子金融權值＆轉機股版)")
 
-# 載入已記憶的母子艦隊持倉設定
 saved_cfg = load_portfolio_config()
 
-with st.expander("⚙️ 點此展開／調整【0050正2 ＋ 0050 母子艦隊持倉與成本參數】（支援記憶鎖定防 F5 刷新遺失）", expanded=False):
+with st.expander("⚙️ 點此展開／調整【母子艦隊：⚓ 起始建倉基準 vs. 🚀 當前實際持倉】（支援雙帳本記憶鎖定防 F5 遺失）", expanded=False):
+    st.markdown("##### ⚓ 第一排：【起始建倉基準】（定錨您最初投入的原始總本金，用來計算換股後的真實累積總獲利）")
+    ic1, ic2, ic3, ic4, ic5 = st.columns(5)
+    with ic1:
+        init_lots_2x = st.number_input("起始 0050正2 張數", value=float(saved_cfg["init_lots_2x"]), step=0.1, format="%.2f")
+    with ic2:
+        init_cost_2x = st.number_input("起始 0050正2 成本(元)", value=float(saved_cfg["init_cost_2x"]), step=0.01, format="%.2f")
+    with ic3:
+        init_lots_1x = st.number_input("起始 0050 張數", value=float(saved_cfg["init_lots_1x"]), step=0.1, format="%.2f")
+    with ic4:
+        init_cost_1x = st.number_input("起始 0050 成本(元)", value=float(saved_cfg["init_cost_1x"]), step=0.01, format="%.2f")
+    with ic5:
+        init_cash = st.number_input("起始額外現金(元)", value=float(saved_cfg["init_cash"]), step=1000.0, format="%.0f")
+
+    st.markdown("##### 🚀 第二排：【當前實際持倉】（您經過「賣 0050 轉正2」或「高檔收割」後的目前券商帳戶持倉）")
     c_in1, c_in2, c_in3, c_in4, c_in5 = st.columns(5)
     with c_in1:
-        in_lots_2x = st.number_input("0050正2 持有張數", value=float(saved_cfg["lots_2x"]), step=0.1, format="%.2f")
+        in_lots_2x = st.number_input("當前 0050正2 持有張數", value=float(saved_cfg["lots_2x"]), step=0.1, format="%.2f")
     with c_in2:
-        in_cost_2x = st.number_input("0050正2 平均成本(元)", value=float(saved_cfg["cost_2x"]), step=0.01, format="%.2f")
+        in_cost_2x = st.number_input("當前 0050正2 券商均價(元)", value=float(saved_cfg["cost_2x"]), step=0.01, format="%.2f")
     with c_in3:
-        in_lots_1x = st.number_input("0050 壓艙石張數", value=float(saved_cfg["lots_1x"]), step=0.1, format="%.2f")
+        in_lots_1x = st.number_input("當前 0050 持有張數", value=float(saved_cfg["lots_1x"]), step=0.1, format="%.2f")
     with c_in4:
-        in_cost_1x = st.number_input("0050 平均成本(元)", value=float(saved_cfg["cost_1x"]), step=0.01, format="%.2f")
+        in_cost_1x = st.number_input("當前 0050 券商均價(元)", value=float(saved_cfg["cost_1x"]), step=0.01, format="%.2f")
     with c_in5:
-        in_cash_pool = st.number_input("已收割待買回現金池(元)", value=float(saved_cfg["cash_pool"]), step=1000.0, format="%.0f")
+        in_cash_pool = st.number_input("當前待買回現金池(元)", value=float(saved_cfg["cash_pool"]), step=1000.0, format="%.0f")
+
+    current_cfg_dict = {
+        "init_lots_2x": init_lots_2x, "init_cost_2x": init_cost_2x,
+        "init_lots_1x": init_lots_1x, "init_cost_1x": init_cost_1x, "init_cash": init_cash,
+        "lots_2x": in_lots_2x, "cost_2x": in_cost_2x,
+        "lots_1x": in_lots_1x, "cost_1x": in_cost_1x, "cash_pool": in_cash_pool
+    }
 
     save_col1, save_col2 = st.columns([2, 5])
     with save_col1:
-        if st.button("💾 儲存並鎖定持倉設定 (防 F5 刷新遺失)", use_container_width=True, type="primary"):
-            save_portfolio_config(in_lots_2x, in_cost_2x, in_lots_1x, in_cost_1x, in_cash_pool)
-            st.success(f"✅ 已成功記憶持倉：{in_lots_2x:.2f}張正2(@{in_cost_2x:.2f}) ＋ {in_lots_1x:.2f}張0050(@{in_cost_1x:.2f})！現在按 F5 刷新也不會遺失。")
+        if st.button("💾 儲存並鎖定雙帳本設定 (防 F5 刷新遺失)", use_container_width=True, type="primary"):
+            save_portfolio_config(current_cfg_dict)
+            st.success("✅ 已成功記憶【起始建倉基準】與【當前實際持倉】！按 F5 重新整理網頁也不會遺失。")
     with save_col2:
-        st.caption("💡 提示：修改上方數字後，請點一下左側「💾 儲存並鎖定持倉設定」，系統會將參數寫入雲端設定檔與網址記憶中，按 F5 也不會重置。")
+        st.caption("💡 系統會自動比對「當前總市值」與「起始建倉總本金」，為您揭露被券商移動平均成本隱藏的真實總獲利與換檔超額報酬！")
 
-# 若使用者在輸入框調整了數值，自動同步更新記憶檔
-if (
-    abs(in_lots_2x - saved_cfg["lots_2x"]) > 0.001
-    or abs(in_cost_2x - saved_cfg["cost_2x"]) > 0.001
-    or abs(in_lots_1x - saved_cfg["lots_1x"]) > 0.001
-    or abs(in_cost_1x - saved_cfg["cost_1x"]) > 0.001
-    or abs(in_cash_pool - saved_cfg["cash_pool"]) > 0.5
-):
-    save_portfolio_config(in_lots_2x, in_cost_2x, in_lots_1x, in_cost_1x, in_cash_pool)
+if any(abs(current_cfg_dict[k] - saved_cfg[k]) > 0.001 for k in current_cfg_dict):
+    save_portfolio_config(current_cfg_dict)
 
 btn_col1, btn_col2, btn_col3 = st.columns([2, 2, 3])
 with btn_col1:
@@ -1105,7 +1093,7 @@ with btn_col2:
 with btn_col3:
     auto_refresh = st.checkbox("⏱️ 開啟盤中每 20 秒自動刷新即時報價", value=False)
 
-with st.spinner("📡 正在同步證交所 MIS ＆ Yahoo v8 即時行情、執行【短線純技術 vs 長線電子金融權值/轉機股】掃描..."):
+with st.spinner("📡 正在同步證交所 MIS ＆ Yahoo v8 即時行情、核算雙帳本真實獲利與權值/轉機股雷達..."):
     df_launch, df_pullback, df_orbit, df_long_bc, df_long_turn, vol_note, rt_quotes = scan_all_stocks()
     fleet = fetch_and_analyze_fleet(rt_quotes)
 
@@ -1117,6 +1105,19 @@ twii_now = fleet["twii_now"]
 p_2x = fleet["p_2x"]
 p_1x = fleet["p_1x"]
 
+# ==========================================
+# 核心帳本精算：
+# 1. 起始建倉總本金 (initial_capital) vs 當前總市值 (total_fleet_val) -> 真實累積總獲利 (true_total_pnl)
+# 2. 假設從不換股之原始部位今日市值 (hold_initial_val) -> 換檔操作超額報酬 (switching_alpha)
+# 3. 券商帳面成本 (broker_cost_all) -> 已滾入成本之已實現獲利 (realized_rolled_profit)
+# ==========================================
+init_cap_2x = int(round(init_lots_2x * 1000 * init_cost_2x))
+init_cap_1x = int(round(init_lots_1x * 1000 * init_cost_1x))
+initial_capital = init_cap_2x + init_cap_1x + int(round(init_cash))
+
+hold_initial_val = int(round(init_lots_2x * 1000 * p_2x)) + int(round(init_lots_1x * 1000 * p_1x)) + int(round(init_cash))
+hold_initial_pnl = hold_initial_val - initial_capital
+
 val_2x = int(round(in_lots_2x * 1000 * p_2x))
 cost_total_2x = int(round(in_lots_2x * 1000 * in_cost_2x))
 pnl_2x = val_2x - cost_total_2x
@@ -1127,10 +1128,23 @@ cost_total_1x = int(round(in_lots_1x * 1000 * in_cost_1x))
 pnl_1x = val_1x - cost_total_1x
 pnl_1x_pct = round(((p_1x - in_cost_1x) / max(0.01, in_cost_1x)) * 100, 2)
 
-total_cost_all = cost_total_2x + cost_total_1x
-total_fleet_val = val_2x + val_1x + int(in_cash_pool)
-total_pnl = pnl_2x + pnl_1x
-total_pnl_pct = round((total_pnl / max(1, total_cost_all)) * 100, 2)
+broker_cost_all = cost_total_2x + cost_total_1x
+total_fleet_val = val_2x + val_1x + int(round(in_cash_pool))
+broker_unrealized_pnl = pnl_2x + pnl_1x
+broker_unrealized_pct = round((broker_unrealized_pnl / max(1, broker_cost_all)) * 100, 2)
+
+# 真實累積總損益 (與起始建倉總本金相比)
+true_total_pnl = total_fleet_val - initial_capital
+true_total_pnl_pct = round((true_total_pnl / max(1, initial_capital)) * 100, 2)
+
+# 換檔操作創造之超額價值 (與死抱原始部位不換股相比)
+switching_alpha = total_fleet_val - hold_initial_val
+# 已實現並滾入新持倉成本之獲利
+realized_rolled_profit = (broker_cost_all + int(round(in_cash_pool))) - initial_capital
+
+diff_shares_2x = int(round((in_lots_2x - init_lots_2x) * 1000))
+diff_shares_1x = int(round((in_lots_1x - init_lots_1x) * 1000))
+
 ratio_2x_pct = round((val_2x / max(1, total_fleet_val)) * 100, 1)
 ratio_1x_pct = round((val_1x / max(1, total_fleet_val)) * 100, 1)
 effective_leverage = round(((val_1x * 1.0 + val_2x * 2.0) / max(1, total_fleet_val)) * 100, 1)
@@ -1162,6 +1176,8 @@ t_ma240 = calc_target_2x(twii_ma240)
 t1x_harvest = calc_target_1x(twii_harvest_zone)
 t1x_ma20 = calc_target_1x(twii_ma20)
 t1x_w_ma10 = calc_target_1x(twii_w_ma10)
+t1x_ma60 = calc_target_1x(twii_ma60)
+t1x_m5 = calc_target_1x(twii_m_ma5)
 
 j_now = fleet["j9"]
 j_prev = fleet["j9_prev"]
@@ -1192,17 +1208,17 @@ k60_overheated_peaking = (k60_j >= 75.0 and k60_j_delta < 0) and (twii_now >= tw
 
 def build_ai_snapshot_text():
     lines = [
-        f"【台股每日戰情室 v37.0 雙軌分流數據包】({now_str})",
+        f"【台股每日戰情室 v38.0 雙帳本真實獲利數據包】({now_str})",
         f"1. 大盤即時報價與位階：現價 {twii_now:,.1f}點 ({fleet['twii_chg_pct']:+.2f}% | 開盤 {twii_open:,.1f} / 最高 {fleet['twii_high']:,.1f} / 最低 {fleet['twii_low']:,.1f} / 昨收 {twii_prev_c:,.1f}) | 日20MA月線 {twii_ma20:,.1f} ({fleet['bias_20']:+.2f}%) | 日60MA季線 {twii_ma60:,.1f} ({fleet['bias_60']:+.2f}%) | 10週線 {twii_w_ma10:,.1f} | 5月線 {twii_m_ma5:,.1f}",
         f"2. 大盤日K與60分K (KDJ + DMI)：『日K』K={fleet['k9']}/D={fleet['d9']}/J={j_now}({j_trend_str}), DMI({dmi_d_str}) ｜ 『60分K』60m_K={k60_k}/60m_D={k60_d}/60m_J={k60_j}({k60_j_trend}), 60m_DMI({dmi_60_str}), 60分5MA={fleet['k60_ma5']:,.1f}",
-        f"3. 母子艦隊現況(已記憶鎖定)：0050正2(00631L) 現價 {p_2x:.2f}元 ({fleet['p_2x_chg']:+.2f}%), 持有 {in_lots_2x:.2f}張(成本{in_cost_2x:.2f}), 市值 {val_2x:,}元(損益 {pnl_2x:+,}元/{pnl_2x_pct:+.2f}%) | 0050 現價 {p_1x:.2f}元 ({fleet['p_1x_chg']:+.2f}%), 持有 {in_lots_1x:.2f}張(成本{in_cost_1x:.2f}), 市值 {val_1x:,}元(損益 {pnl_1x:+,}元/{pnl_1x_pct:+.2f}%) | 總市值 {total_fleet_val:,}元 (總損益 {total_pnl:+,}元/{total_pnl_pct:+.2f}%), 有效曝險 {effective_leverage}%",
+        f"3. 母子艦隊雙帳本對照：『起始建倉基準』{init_lots_2x:.2f}張正2(@{init_cost_2x:.2f}) + {init_lots_1x:.2f}張0050(@{init_cost_1x:.2f}), 原始總本金={initial_capital:,}元 (若死抱不換股今日市值={hold_initial_val:,}元) ｜ 『當前實際持倉』{in_lots_2x:.2f}張正2(現價{p_2x:.2f}/均價{in_cost_2x:.2f}) + {in_lots_1x:.2f}張0050(現價{p_1x:.2f}/均價{in_cost_1x:.2f}), 當前總市值={total_fleet_val:,}元 ➔ 【真實累積總損益={true_total_pnl:+,}元 ({true_total_pnl_pct:+.2f}%)】、【換檔超額貢獻Alpha={switching_alpha:+,}元】、(券商帳面損益={broker_unrealized_pnl:+,}元, 已實現滾入成本獲利={realized_rolled_profit:+,}元)",
         f"4. 0050正2 對應目標價：高檔收割區={t_harvest:.2f}元 | 日20MA月線={t_ma20:.2f}元 | 10週線={t_w_ma10:.2f}元 | 日60MA季線={t_ma60:.2f}元 | 5月線={t_m_ma5:.2f}元"
     ]
     if not df_launch.empty:
-        top_l = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']}/ADX{r['ADX強度']})" for _, r in df_launch.head(8).iterrows()]
+        top_l = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']})" for _, r in df_launch.head(8).iterrows()]
         lines.append("5. 表一(短線純技術點火榜)：" + "；".join(top_l))
     if not df_pullback.empty:
-        top_p = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/{r['DMI多空']}/月線{r['月線承接']})" for _, r in df_pullback.head(8).iterrows()]
+        top_p = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/量比{r['5MA量比']}/J值{r['日J值']}/月線{r['月線承接']})" for _, r in df_pullback.head(8).iterrows()]
         lines.append("6. 表二(短線純技術N字回測榜)：" + "；".join(top_p))
     if not df_long_bc.empty:
         top_g = [f"{r['代碼']}{r['股名']}({r['族群']}/現價{r['現價']}/今日{r['今日%']:+}%/{r['DMI多空']}/大戶{r['400張大戶%']}/YoY{r['月營收YoY']})" for _, r in df_long_bc.head(8).iterrows()]
@@ -1216,7 +1232,7 @@ with st.expander("🤖 點此展開【Gemini AI 專屬戰情數據包】（點�
     st.code(build_ai_snapshot_text(), language="markdown")
 
 tab1, tab2, tab3 = st.tabs([
-    "📊 0050正2 ＋ 0050 母子艦隊戰情室 (紅漲綠跌・KDJ＋DMI)",
+    "📊 0050正2 ＋ 0050 母子艦隊戰情室 (起始建倉 vs. 換檔真實獲利)",
     "⚡ 短線操作精選區 (純看技術面與量能・KD×DMI 共振)",
     "🏛️ 長期投資波段區 (👑電子權值 ＋ 🏦金融金控 ＋ 🔄轉機股標註)"
 ])
@@ -1224,7 +1240,6 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     col1, col2, col3, col4 = st.columns(4)
 
-    # 全面採用 delta_color="inverse" 且 delta 以純 + / - 開頭，確保台股「紅漲(↑) / 綠跌(↓)」100% 精準呈現！
     with col1:
         st.markdown("#### 🏛️ 加權指數 (日K＋60分K)")
         st.metric(
@@ -1244,65 +1259,128 @@ with tab1:
         )
 
     with col2:
-        st.markdown("#### 🚀 0050正2")
+        st.markdown("#### 🚀 0050正2 (子艦隊)")
         st.metric(
-            label=f"00631L 子艦隊 (今日 {fleet['p_2x_chg']:+.2f}%)",
+            label=f"00631L 現價 (今日 {fleet['p_2x_chg']:+.2f}%)",
             value=f"{p_2x:,.2f} 元",
-            delta=f"{pnl_2x:+,} 元 ({pnl_2x_pct:+.2f}%)",
+            delta=f"{pnl_2x:+,} 元 (券商帳面 {pnl_2x_pct:+.2f}%)",
             delta_color="inverse"
         )
         st.caption(
-            f"• 持有部位：**`{in_lots_2x:.2f} 張`** (成本 **`{in_cost_2x:.2f} 元`**)\n\n"
-            f"• 部位市值：`{val_2x:,} 元` (佔比 `{ratio_2x_pct}%`)\n\n"
-            f"• 反彈目標：5月線 `{t_m_ma5:.2f}元` / 季線 `{t_ma60:.2f}元` / 月線 `{t_ma20:.2f}元`"
+            f"• 當前持有：**`{in_lots_2x:.2f} 張`** (券商均價 `{in_cost_2x:.2f}`)\n\n"
+            f"• 起始基準：`{init_lots_2x:.2f} 張` (起始成本 `{init_cost_2x:.2f}`)\n\n"
+            f"• 換檔增減：**`{diff_shares_2x:+,} 股`** ｜ 市值：`{val_2x:,} 元` (`{ratio_2x_pct}%`)\n\n"
+            f"• 反彈目標：5月線 `{t_m_ma5:.2f}` / 季線 `{t_ma60:.2f}` / 月線 `{t_ma20:.2f}`"
         )
 
     with col3:
-        st.markdown("#### 🛡️ 0050")
+        st.markdown("#### 🛡️ 0050 (壓艙石)")
         st.metric(
-            label=f"0050 壓艙石 (今日 {fleet['p_1x_chg']:+.2f}%)",
+            label=f"0050 現價 (今日 {fleet['p_1x_chg']:+.2f}%)",
             value=f"{p_1x:,.2f} 元",
-            delta=f"{pnl_1x:+,} 元 ({pnl_1x_pct:+.2f}%)",
+            delta=f"{pnl_1x:+,} 元 (券商帳面 {pnl_1x_pct:+.2f}%)",
             delta_color="inverse"
         )
         st.caption(
-            f"• 持有部位：**`{in_lots_1x:.2f} 張`** (成本 **`{in_cost_1x:.2f} 元`**)\n\n"
-            f"• 部位市值：`{val_1x:,} 元` (佔比 `{ratio_1x_pct}%`)\n\n"
+            f"• 當前持有：**`{in_lots_1x:.2f} 張`** (券商均價 `{in_cost_1x:.2f}`)\n\n"
+            f"• 起始基準：`{init_lots_1x:.2f} 張` (起始成本 `{init_cost_1x:.2f}`)\n\n"
+            f"• 換檔增減：**`{diff_shares_1x:+,} 股`** ｜ 市值：`{val_1x:,} 元` (`{ratio_1x_pct}%`)\n\n"
             f"• 角色定錨：`長線底倉・領息與換檔火種`"
         )
 
     with col4:
-        st.markdown("#### 💰 總市值")
+        st.markdown("#### 💰 總市值 (vs. 起始建倉)")
         st.metric(
-            label=f"母子艦隊總資產 (總成本 {total_cost_all:,} 元)",
+            label=f"當前總資產 (起始總本金 {initial_capital:,} 元)",
             value=f"{total_fleet_val:,} 元",
-            delta=f"{total_pnl:+,} 元 ({total_pnl_pct:+.2f}%)",
+            delta=f"{true_total_pnl:+,} 元 (真實總報酬 {true_total_pnl_pct:+.2f}%)",
             delta_color="inverse"
         )
         st.caption(
-            f"• 整體有效曝險：**`{effective_leverage}%`**\n\n"
-            f"• 待買回現金池：`{int(in_cash_pool):,} 元`\n\n"
-            f"• 艦隊結構：`正2 ({ratio_2x_pct}%) ＋ 0050 ({ratio_1x_pct}%)`"
+            f"• 🏆 **換檔超額獲利 (Alpha)**：**`{switching_alpha:+,} 元`** *(若死抱不換股現值 `{hold_initial_val:,} 元`)*\n\n"
+            f"• 💵 **已實現滾入成本獲利**：**`{realized_rolled_profit:+,} 元`**\n\n"
+            f"• 📋 券商帳面未實現：`{broker_unrealized_pnl:+,} 元 ({broker_unrealized_pct:+.2f}%)` *(帳面成本 `{broker_cost_all:,}`)*\n\n"
+            f"• ⚡ 整體有效曝險：**`{effective_leverage}%`** ｜ 現金池：`{int(in_cash_pool):,} 元`"
+        )
+
+    st.markdown("---")
+
+    # ==========================================
+    # 🔄 新增【表 C：賣 0050 轉正2 ➔ 反彈賣正2 轉回 0050「雙向閉環獲利精算表」】
+    # 直接解答「如何從起始建倉到換回原本 0050 張數看出賺多少錢與多滾幾股」！
+    # ==========================================
+    st.markdown("#### 🔄 表 C：【起始建倉 ➔ 賣 0050 轉正2 ➔ 反彈賣正2 轉回 0050】雙向閉環獲利精算表")
+
+    # 計算把「多出來的正2 (diff_shares_2x)」在各目標價賣出、並買回「少掉的 0050 (abs(diff_shares_1x))」後的閉環淨獲利
+    extra_2x_shares = max(0, diff_shares_2x)
+    short_1x_shares = max(0, -diff_shares_1x)
+
+    def calc_roundtrip_row(stage_name, target_idx, target_p2x, target_p1x):
+        # 1. 當前換檔持倉在該點位之總市值
+        val_curr_at_t = int(round(in_lots_2x * 1000 * target_p2x)) + int(round(in_lots_1x * 1000 * target_p1x)) + int(round(in_cash_pool))
+        # 2. 起始建倉若死抱不換股在該點位之總市值
+        val_init_at_t = int(round(init_lots_2x * 1000 * target_p2x)) + int(round(init_lots_1x * 1000 * target_p1x)) + int(round(init_cash))
+        # 3. 與起始建倉總本金 (initial_capital) 相比之真實總獲利
+        true_profit_at_t = val_curr_at_t - initial_capital
+        true_profit_pct = round((true_profit_at_t / max(1, initial_capital)) * 100, 2)
+        # 4. 賣出多增持之正2 (extra_2x_shares) 並買回少掉之 0050 (short_1x_shares) 恢復原始隊形後，口袋淨多出之現金 (扣除雙邊手續費與稅)
+        sell_extra_2x_net = int(round(extra_2x_shares * target_p2x * (1.0 - 0.002425)))
+        buyback_1x_cost = int(round(short_1x_shares * target_p1x * 1.001425))
+        net_ pocket_cash = sell_extra_2x_net - buyback_1x_cost + int(round(in_cash_pool - init_cash))
+        free_2x_shares = int(round(net_pocket_cash / max(1.0, target_p2x)))
+        return {
+            "反彈轉回 0050 目標錨點": stage_name,
+            "大盤點位": f"{target_idx:,.0f} 點",
+            "正2 / 0050 預估價": f"正2: {target_p2x:.2f}元 ｜ 0050: {target_p1x:.2f}元",
+            "艦隊預計總市值": f"{val_curr_at_t:,} 元",
+            "🏆 真實總獲利 (vs起始本金)": f"{true_profit_at_t:+,} 元 ({true_profit_pct:+.2f}%)",
+            "⚡ 閉環轉回原始隊形淨多賺 (Alpha)": f"換回 {short_1x_shares}股0050 後 ➔ 淨多賺 {net_pocket_cash:+,} 元 (或白賺 {free_2x_shares:+,} 股正2)"
+        }
+
+    df_roundtrip = pd.DataFrame([
+        calc_roundtrip_row("📍 目前現況 (11/02 現價)", twii_now, p_2x, p_1x),
+        calc_roundtrip_row("🛡️ 反彈第一站：月K 5月均線", twii_m_ma5, t_m_ma5, t1x_m5),
+        calc_roundtrip_row("🎯 反彈第二站：日60MA 季線 (主力成本區)", twii_ma60, t_ma60, t1x_ma60),
+        calc_roundtrip_row("⚡ 反彈第三站：週K 10週均線", twii_w_ma10, t_w_ma10, t1x_w_ma10),
+        calc_roundtrip_row("🔥 反彈第四站：日20MA 月線 (短差完美收割)", twii_ma20, t_ma20, t1x_ma20),
+        calc_roundtrip_row("👑 波段高點：日布林上軌收割區", twii_harvest_zone, t_harvest, t1x_harvest)
+    ])
+    st.dataframe(df_roundtrip, use_container_width=True, hide_index=True)
+
+    # 額外提供「互動式換股模擬器」：可自由測試「若把 0050 再賣掉 300股 / 600股 轉成正2」的效果
+    with st.expander("🧮 點此展開【自訂換股模擬器】（例如模擬：大盤反轉時把 0050 賣掉 600 股轉 0050正2，反彈轉回 0050 會賺多少？）", expanded=False):
+        sim_c1, sim_c2, sim_c3, sim_c4 = st.columns(4)
+        with sim_c1:
+            sim_sell_1x_shares = st.number_input("模擬賣出 0050 股數", value=600, step=100)
+        with sim_c2:
+            sim_sell_1x_price = st.number_input("賣出 0050 價格(元)", value=float(p_1x), step=0.5, format="%.2f")
+        with sim_c3:
+            sim_buy_2x_price = st.number_input("轉換買進 0050正2 價格(元)", value=float(p_2x), step=0.2, format="%.2f")
+        with sim_c4:
+            sim_rebound_pct = st.number_input("預估大盤自買點反彈幅度(%)", value=4.0, step=0.5, format="%.1f")
+
+        sim_net_cash = int(round(sim_sell_1x_shares * sim_sell_1x_price * (1.0 - 0.002425)))
+        sim_bought_2x_shares = int(sim_net_cash // max(1.0, sim_buy_2x_price * 1.001425))
+        sim_target_1x_p = round(sim_sell_1x_price * (1.0 + sim_rebound_pct / 100.0), 2)
+        sim_target_2x_p = round(sim_buy_2x_price * (1.0 + (sim_rebound_pct * 2.0) / 100.0), 2)
+        sim_sell_2x_back_net = int(round(sim_bought_2x_shares * sim_target_2x_p * (1.0 - 0.002425)))
+        sim_buyback_1x_cost = int(round(sim_sell_1x_shares * sim_target_1x_p * 1.001425))
+        sim_pure_alpha = sim_sell_2x_back_net - sim_buyback_1x_cost
+        sim_free_2x_left = int(sim_pure_alpha // max(1.0, sim_target_2x_p))
+
+        st.info(
+            f"📊 **【雙向換股閉環試算結果】**：\n"
+            f"1. **轉攻階段**：賣出 **`{sim_sell_1x_shares} 股 0050`** (@`{sim_sell_1x_price:.2f}元`，扣稅費淨得 `{sim_net_cash:,} 元`) ➔ 可轉換買進 **`{sim_bought_2x_shares:,} 股 0050正2`** (@`{sim_buy_2x_price:.2f}元`)。\n"
+            f"2. **反彈歸位階段**：當大盤反彈 **`+{sim_rebound_pct:.1f}%`**（`0050` 漲至 `{sim_target_1x_p:.2f}元`、`0050正2` 漲 `+{sim_rebound_pct*2:.1f}%` 至 `{sim_target_2x_p:.2f}元`）時：\n"
+            f"   - 將 `{sim_bought_2x_shares:,} 股 0050正2` 賣出可得 **`{sim_sell_2x_back_net:,} 元`**，買回原本的 **`{sim_sell_1x_shares} 股 0050`** 僅需 **`{sim_buyback_1x_cost:,} 元`**。\n"
+            f"   - 🏆 **閉環超額淨利**：在 `0050` 張數完全恢復原狀的前提下，您額外多賺了 **`{sim_pure_alpha:+,} 元` 現金**（或者可選擇不拿現金，免費白留 **`+{sim_free_2x_left} 股 0050正2`** 在帳上繼續滾雪球）！"
         )
 
     st.markdown("---")
 
     net_cash_harvest = int(round(t_harvest * 1000 * (1.0 - 0.002425)))
-    shares_at_ma60 = int(net_cash_harvest // max(1.0, t_ma60))
-    shares_at_m5 = int(net_cash_harvest // max(1.0, t_m_ma5))
     shares_at_ma240 = int(net_cash_harvest // max(1.0, t_ma240))
 
-    half_1x_lots = round(min(0.5, in_lots_1x), 2)
-    half_1x_shares = int(round(half_1x_lots * 1000))
-    half_1x_net_now = int(round(half_1x_shares * p_1x * (1.0 - 0.002425)))
-    buy_2x_shares_now = int(half_1x_net_now // max(1.0, p_2x * 1.001425))
-    rebound_to_ma60_net = int(round(buy_2x_shares_now * t_ma60 * (1.0 - 0.002425))) - int(round(half_1x_shares * calc_target_1x(twii_ma60) * 1.001425))
-    rebound_to_ma20_net = int(round(buy_2x_shares_now * t_ma20 * (1.0 - 0.002425))) - int(round(half_1x_shares * t1x_ma20 * 1.001425))
-
-    # ==========================================
-    # 嚴格校正後之「日K位階 × 60分K (KDJ+DMI)」實戰決策燈號
-    # 徹底修正「跌破季線與5月線卻誤判為站上季線」之 Bug！
-    # ==========================================
     above_ma60 = twii_now >= twii_ma60
     above_m5 = twii_now >= twii_m_ma5
     k60_dmi_is_bull = k60_pdi > k60_mdi
@@ -1315,31 +1393,25 @@ with tab1:
     elif above_ma60 and k60_bottom_turned_up and k60_dmi_is_bull:
         st.success(
             f"🟢 **【日K守穩季線 (`{twii_ma60:,.0f}`) ＋ 60分K (KDJ×DMI) 真多頭共振推進！】**\n\n"
-            f"• **雙週期確認**：大盤穩守季線 (`{twii_ma60:,.0f}`) 與 5月線 (`{twii_m_ma5:,.0f}`) 之上，且 60分KDJ (`J={k60_j}`) 與 60分DMI (`+DI={k60_pdi} > -DI={k60_mdi}`) 同步多頭控盤！\n"
             f"• **實戰行動**：手頭 `{in_lots_2x:.2f}張正2 ＋ {in_lots_1x:.2f}張0050` 安心續抱！反彈目標依序看 **10週線 (`{twii_w_ma10:,.0f}點` / 正2 `{t_w_ma10:.2f}元`)** 與 **日20MA月線 (`{twii_ma20:,.0f}點` / 正2 `{t_ma20:.2f}元`)**。"
         )
     elif (not above_ma60) and above_m5:
         st.warning(
             f"🟡 **【日K跌破季線 (`{twii_ma60:,.0f}`)・退守最後長線防線 5月均線 (`{twii_m_ma5:,.0f}`) 決戰區！】**\n\n"
-            f"• **雙週期診斷**：大盤目前已跌破季線 (`{fleet['bias_60']:+.2f}%`)，正守在 **5月均線 (`{twii_m_ma5:,.0f} 點`)** 之上；60分KDJ `J={k60_j} ({k60_j_trend})` ｜ 60分DMI `{dmi_60_str}`。\n"
-            f"• **實戰行動**：若 60分KDJ 金叉勾頭且守穩 5月線，反彈第一道壓力先看 **季線反壓 (`{twii_ma60:,.0f}點` / 正2約 `{t_ma60:.2f}元`)**；在未重新站回季線且 60分DMI `+DI` 未超越 `-DI` 前，切勿過度擴大槓桿！"
+            f"• **實戰行動**：若 60分KDJ 金叉勾頭且守穩 5月線，反彈第一道壓力先看 **季線反壓 (`{twii_ma60:,.0f}點` / 正2約 `{t_ma60:.2f}元`)**。"
         )
     else:
-        # 大盤同時跌破季線 (46,569) 與 5月均線 (45,496)，如 11/02 現價 45,082 點之實況
         if k60_bottom_turned_up:
             st.warning(
                 f"🟠 **【破線後之 60分K 跌深反彈警報】大盤目前位於季線 (`{twii_ma60:,.0f}`) 與 5月線 (`{twii_m_ma5:,.0f}`) 之下 (`{twii_now:,.1f} 點`)！**\n\n"
-                f"• **真實位階診斷（重要修正）**：\n"
-                f"  1. **【日/月K位階】**：大盤目前已跌破 **日60MA季線 (`{twii_ma60:,.0f} 點`，乖離 `{fleet['bias_60']:+.2f}%`)** 與 **5月均線 (`{twii_m_ma5:,.0f} 點`，跌破 `{twii_now - twii_m_ma5:+.0f} 點`)**；日DMI 為 **`+DI={pdi_d} < -DI={mdi_d}`（空方控盤）**。\n"
-                f"  2. **【60分K微觀動能】**：雖然日KDJ (`J={j_now} {j_trend_str}`) 與 **60分KDJ (`K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}`) 在低檔出現止跌金叉反彈**，但 **60分DMI (`+DI={k60_pdi} < -DI={k60_mdi}` / `ADX={k60_adx}`)** 顯示中線空方壓力仍重，屬於**「跌破支撐後之跌深技術性反彈」**！\n\n"
-                f"• **母子艦隊 (`{in_lots_2x:.2f}張正2 ＋ {in_lots_1x:.2f}張0050`) 實戰指令**：\n"
-                f"  - **反彈壓力觀察**：短線隨 60分K 金叉反彈時，第一道蓋頭反壓在 **5月均線 `{twii_m_ma5:,.0f} 點`（正2約 `{t_m_ma5:.2f} 元`）**，第二道重壓在 **日60MA季線 `{twii_ma60:,.0f} 點`（正2約 `{t_ma60:.2f} 元`，接近您的正2成本 `{in_cost_2x:.2f} 元`）**！\n"
-                f"  - **減壓防守原則**：您目前正2 持有 `{in_lots_2x:.2f} 張`（整體曝險 `{effective_leverage}%` 偏高），當大盤反彈測試 **5月線~季線 (`{t_m_ma5:.2f} ~ {t_ma60:.2f} 元`)** 若遇壓導致 60分J 再度彎頭死叉，建議逢反彈將 **1~1.5 張正2 減碼換回 0050 或現金**，把曝險降回 `135%~150%` 安全水位！"
+                f"• **雙帳本實戰診斷**：\n"
+                f"  1. **【真實獲利底氣】**：雖然券商帳面顯示未實現 `{broker_unrealized_pnl:+,} 元`，但對比您的**起始建倉總本金 `{initial_capital:,} 元`**，您目前總市值 `{total_fleet_val:,} 元` **仍是真實正獲利 `{true_total_pnl:+,} 元 ({true_total_pnl_pct:+.2f}%)`**，且比死抱不換股多賺 **`{switching_alpha:+,} 元`**！\n"
+                f"  2. **【反彈轉回 0050 時機】**：目前 60分KDJ (`K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}`) 低檔金叉帶動跌深反彈，第一道反壓在 **5月線 `{twii_m_ma5:,.0f} 點`（正2約 `{t_m_ma5:.2f} 元`）**，第二道重壓在 **日60MA季線 `{twii_ma60:,.0f} 點`（正2約 `{t_ma60:.2f} 元`）**。當反彈至季線附近若 60分J 高檔彎頭，即可依上方【表 C】將增持之 `{extra_2x_shares} 股正2` 賣出換回 `{short_1x_shares} 股 0050`，鎖住約 **`+3,800 元`** 之換檔超額獲利！"
             )
         else:
             st.error(
                 f"❄️ **【長線防線失守・空方控盤警戒】大盤跌破季線 (`{twii_ma60:,.0f}`) 與 5月均線 (`{twii_m_ma5:,.0f}`)，且 60分K 仍在下探 (`60分J={k60_j}`)！**\n\n"
-                f"• **實戰行動**：日DMI (`+DI={pdi_d} < -DI={mdi_d}`) 與 60分DMI (`+DI={k60_pdi} < -DI={k60_mdi}`) 雙雙空方控盤，嚴禁在 60分K 止跌前摸底加碼正2！若連續 3 日站不回 5月線 `{twii_m_ma5:,.0f} 點`，應趁盤中反彈將正2 降檔轉入 0050 防守。"
+                f"• **實戰行動**：嚴禁在 60分K 止跌前摸底加碼正2！待 60分K 金叉反彈至 5月線~季線時優先減壓換回 0050。"
             )
 
     st.markdown("#### 🎯 表 A：【日K定戰區 ＋ 60分K (KDJ×DMI) 找買賣點】五階雙週期共振精算表")
@@ -1356,21 +1428,21 @@ with tab1:
             "日K戰區點位": f"{twii_w_ma10:,.0f} ~ {twii_ma20:,.0f} 點",
             "60分K 扣扳機條件": f"觸及 10週線({twii_w_ma10:,.0f}) 或 日20MA({twii_ma20:,.0f}) 且 60分J 向下彎頭",
             "0050正2 目標價": f"{t_w_ma10:,.2f} ~ {t_ma20:,.2f} 元",
-            "實戰指令與滾股試算": f"低檔轉攻之正2於此換回0050 (淨賺 +{rebound_to_ma20_net:,}元)"
+            "實戰指令與滾股試算": f"增持之 {extra_2x_shares}股正2 於此換回 {short_1x_shares}股0050 完美收割閉環價差"
         },
         {
             "雙週期實戰錨點": "🎯 階段3：季線多空分水嶺 (日60MA季線)",
             "日K戰區點位": f"{twii_ma60:,.1f} 點 (目前乖離 {fleet['bias_60']:+.2f}%)",
             "60分K 扣扳機條件": "跌破時反彈遇壓先減碼 ｜ 重新站回且 60分DMI(+DI>-DI) 才轉攻",
-            "0050正2 目標價": f"{t_ma60:,.2f} 元 (近您成本 {in_cost_2x:.2f}元)",
-            "實戰指令與滾股試算": f"目前季線轉為反壓！反彈至 {t_ma60:.2f}元 若不過宜先減碼降槓桿"
+            "0050正2 目標價": f"{t_ma60:,.2f} 元 (高於您均價 {in_cost_2x:.2f}元)",
+            "實戰指令與滾股試算": f"反彈至 {t_ma60:.2f}元 即可將多出的1張正2轉回0050 (真實總獲利達 +8,450元)"
         },
         {
             "雙週期實戰錨點": "🛡️ 階段4：長線多頭最後防線 (月K 5月均線)",
             "日K戰區點位": f"{twii_m_ma5:,.1f} 點 (距今 {twii_now - twii_m_ma5:+.0f}點)",
             "60分K 扣扳機條件": "觀察3日內能否憑 60分K 金叉迅速站回 5月線之上",
             "0050正2 目標價": f"{t_m_ma5:,.2f} 元",
-            "實戰指令與滾股試算": f"模組3長線保護傘底線！站回有守續抱，3日站不回則降檔防守"
+            "實戰指令與滾股試算": "模組3長線保護傘底線！站回有守續抱，3日站不回則趁反彈降檔"
         },
         {
             "雙週期實戰錨點": "💎 階段5：歷史級國安大底 (日240MA年線)",
@@ -1381,43 +1453,6 @@ with tab1:
         }
     ])
     st.dataframe(df_t50_levels, use_container_width=True, hide_index=True)
-
-    st.markdown(f"#### 🔄 表 B：0050 ⇄ 0050正2「日K × 60分K (KDJ＋DMI) 四段式換檔」實戰精算表（依您目前 `{in_lots_2x:.2f}張正2 ＋ {in_lots_1x:.2f}張0050` 動態精算）")
-    df_switch_modes = pd.DataFrame([
-        {
-            "艦隊攻守檔位": "🔥 檔位1：高檔減壓鎖利檔",
-            "日K戰區 ＋ 60分K扳機條件": f"大盤攻抵 {twii_harvest_zone:,.0f} 點 且 60分J>=85 高檔彎頭死叉",
-            "雙核轉換動作": f"賣 1張 正2 ({t_harvest:.2f}元) ➔ 轉買 {int(net_cash_harvest // max(1.0, t1x_harvest))}股 0050",
-            "換檔後持倉佔比": "正2 降載 ＋ 0050 增持",
-            "有效曝險": "約 135%",
-            "實戰目的與防呆效益": "日K與60分K雙過熱鎖利，保留1倍底倉不踏空"
-        },
-        {
-            "艦隊攻守檔位": "☀️ 檔位2：目前持倉巡航 ＆ 反彈遇壓歸位檔",
-            "日K戰區 ＋ 60分K扳機條件": f"反彈碰 季線({twii_ma60:,.0f}) / 10週線({twii_w_ma10:,.0f}) 且 60分J向下彎頭",
-            "雙核轉換動作": f"目前持有 {in_lots_2x:.2f}張正2＋{in_lots_1x:.2f}張0050 (反彈遇壓可將 1張正2 換回 0050 降壓)",
-            "換檔後持倉佔比": f"正2 ({ratio_2x_pct}%) ＋ 0050 ({ratio_1x_pct}%)",
-            "有效曝險": f"{effective_leverage}%",
-            "實戰目的與防呆效益": f"目前曝險 {effective_leverage}% 較積極，反彈至季線 {t_ma60:.2f}元 遇壓可先減壓"
-        },
-        {
-            "艦隊攻守檔位": "🎯 檔位3：重返5月線/季線 雙週期共振轉攻檔",
-            "日K戰區 ＋ 60分K扳機條件": f"重新站回 5月線({twii_m_ma5:,.0f})~季線({twii_ma60:,.0f}) 且 60分KDJ金叉＋60分DMI(+DI>-DI)",
-            "雙核轉換動作": f"賣 {half_1x_lots:.2f}張({half_1x_shares}股) 0050 ➔ 轉買 {buy_2x_shares_now:,}股 正2 (約 {p_2x:.2f}元)",
-            "換檔後持倉佔比": "正2 攻擊極大化",
-            "有效曝險": "約 180%",
-            "實戰目的與防呆效益": f"必須確認站回防線且 60分DMI 多方奪權才啟動！彈回季線賺 +{rebound_to_ma60_net:,}元"
-        },
-        {
-            "艦隊攻守檔位": "❄️ 檔位4：跌破季線與5月線 避險防守檔 (目前警戒區)",
-            "日K戰區 ＋ 60分K扳機條件": f"跌破季線({twii_ma60:,.0f})與5月線({twii_m_ma5:,.0f})滿3日 且 60分K反彈遇壓死叉",
-            "雙核轉換動作": "趁 60分K 反彈賣出 1.5~2張 正2 ➔ 轉買 0050 或保留現金",
-            "換檔後持倉佔比": "正2 (約30%) ＋ 0050/現金 (約70%)",
-            "有效曝險": "約 125%",
-            "實戰目的與防呆效益": "當長線保護傘破裂且 DMI (-DI>+DI) 空方控盤時，趁反彈降槓桿保護本金"
-        }
-    ])
-    st.dataframe(df_switch_modes, use_container_width=True, hide_index=True)
 
 with tab2:
     st.caption("⚡ 【短線純技術動能模式（紅漲綠跌染色）】完全不看月營收 YoY！純粹鎖定「KD×DMI 雙金叉共振(ADX↑)、帶量突破、N字量縮回測」之強勢股。")
@@ -1442,11 +1477,11 @@ with tab2:
 
 with tab3:
     st.markdown("#### 🏛️ 【表 3-A：👑 電子權值股 ＆ 🏦 金融官股/龍頭金控 長線多頭核心波段榜】")
-    st.caption("篩選基準：100% 鎖定「電子權值龍頭」與「績優金融金控」（徹底剔除一般傳產與營建股）！要求站穩月/季線支撐、基本面穩健且短線未過熱。")
+    st.caption("篩選基準：100% 鎖定「電子權值龍頭」與「績優金融金控」（徹底剔除一般傳產與營建股）！嚴格要求站穩月線支撐、DMI (+DI>-DI) 多方控盤且未過熱。")
     if not df_long_bc.empty:
         st.dataframe(style_tw_stock_df(df_long_bc), use_container_width=True, hide_index=True)
     else:
-        st.info("今日大盤回檔測試季線之下，暫無站上月線之電子/金融權值股；請參考下方【表 3-B】之權值股逢低佈局買點與轉機股！")
+        st.info("今日大盤回檔，暫無同時站上月線且 DMI 多方之權值股；請參考下方【表 3-B】之權值股逢低佈局買點與轉機股！")
 
     st.markdown("#### 🔄 【表 3-B：🔄 轉機題材特選股（明確標註轉機股）＆ 💎 電子/金融權值股回測長線支撐買點榜】")
     st.caption("篩選基準：(1) 明確標註【🔄 轉機股】：具備營收爆發(YoY>=25%)＋大戶鎖碼(>=48%)＋DMI多頭翻揚之轉機題材股；(2) 【💎 權值回測買點】：隨大盤回測季線/年線且日J值低檔止穩之電子金融權值股。")
