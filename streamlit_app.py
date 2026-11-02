@@ -15,7 +15,7 @@ import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(
-    page_title="台股每日戰情室 v38.0",
+    page_title="台股每日戰情室 v38.1",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -23,20 +23,19 @@ st.set_page_config(
 
 # ==========================================
 # 模組 0：母子艦隊「起始建倉基準 vs. 當前實際持倉」雙帳本記憶引擎
-# 支援 JSON 檔案 + URL Query Params 雙重鎖定，按 F5 刷新絕不遺失！
 # ==========================================
 CONFIG_FILE = "fleet_portfolio_v38.json"
 DEFAULT_PORTFOLIO = {
-    # 帳本 A：起始建倉基準 (原始投入本金定錨)
+    # 帳本 A：起始建倉基準 (原始投入本金 205,940 元)
     "init_lots_2x": 3.00,
     "init_cost_2x": 34.68,
     "init_lots_1x": 1.00,
     "init_cost_1x": 101.90,
     "init_cash": 0.0,
-    # 帳本 B：當前實際持倉 (換檔後現況)
-    "lots_2x": 4.00,
-    "cost_2x": 35.27,
-    "lots_1x": 0.70,
+    # 帳本 B：當前實際持倉 (賣 600股 0050 轉正2 後之現況)
+    "lots_2x": 5.00,
+    "cost_2x": 35.04,
+    "lots_1x": 0.40,
     "cost_1x": 101.90,
     "cash_pool": 0.0
 }
@@ -110,7 +109,6 @@ def get_volume_multiplier():
     return mult_clean, f"盤中即時推估 (U型倍率 {mult_clean:.2f}x)"
 
 def style_tw_stock_df(df):
-    """台股專屬配色：正數（漲/獲利/成長）顯示鮮紅色，負數（跌/虧損/衰退）顯示翠綠色"""
     if df.empty:
         return df
 
@@ -1031,10 +1029,10 @@ def scan_all_stocks():
     return df_t1, df_t2, df_t3, df_long_bc, df_long_turn, vol_note, rt_quotes
 
 # ==========================================
-# 模組 6：Streamlit 戰情室主介面 (v38.0 起始建倉 vs 當前持倉雙帳本真實獲利版)
+# 模組 6：Streamlit 戰情室主介面 (v38.1 雙帳本真實獲利對照版)
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🏛️ 台股每日戰情室 v38.0 (起始建倉基準 vs. 換檔真實獲利對照・電子金融權值＆轉機股版)")
+st.markdown("## 🏛️ 台股每日戰情室 v38.1 (起始建倉基準 vs. 換檔真實獲利對照・電子金融權值＆轉機股版)")
 
 saved_cfg = load_portfolio_config()
 
@@ -1105,18 +1103,12 @@ twii_now = fleet["twii_now"]
 p_2x = fleet["p_2x"]
 p_1x = fleet["p_1x"]
 
-# ==========================================
-# 核心帳本精算：
-# 1. 起始建倉總本金 (initial_capital) vs 當前總市值 (total_fleet_val) -> 真實累積總獲利 (true_total_pnl)
-# 2. 假設從不換股之原始部位今日市值 (hold_initial_val) -> 換檔操作超額報酬 (switching_alpha)
-# 3. 券商帳面成本 (broker_cost_all) -> 已滾入成本之已實現獲利 (realized_rolled_profit)
-# ==========================================
+# 雙帳本核心精算
 init_cap_2x = int(round(init_lots_2x * 1000 * init_cost_2x))
 init_cap_1x = int(round(init_lots_1x * 1000 * init_cost_1x))
 initial_capital = init_cap_2x + init_cap_1x + int(round(init_cash))
 
 hold_initial_val = int(round(init_lots_2x * 1000 * p_2x)) + int(round(init_lots_1x * 1000 * p_1x)) + int(round(init_cash))
-hold_initial_pnl = hold_initial_val - initial_capital
 
 val_2x = int(round(in_lots_2x * 1000 * p_2x))
 cost_total_2x = int(round(in_lots_2x * 1000 * in_cost_2x))
@@ -1133,13 +1125,10 @@ total_fleet_val = val_2x + val_1x + int(round(in_cash_pool))
 broker_unrealized_pnl = pnl_2x + pnl_1x
 broker_unrealized_pct = round((broker_unrealized_pnl / max(1, broker_cost_all)) * 100, 2)
 
-# 真實累積總損益 (與起始建倉總本金相比)
 true_total_pnl = total_fleet_val - initial_capital
 true_total_pnl_pct = round((true_total_pnl / max(1, initial_capital)) * 100, 2)
 
-# 換檔操作創造之超額價值 (與死抱原始部位不換股相比)
 switching_alpha = total_fleet_val - hold_initial_val
-# 已實現並滾入新持倉成本之獲利
 realized_rolled_profit = (broker_cost_all + int(round(in_cash_pool))) - initial_capital
 
 diff_shares_2x = int(round((in_lots_2x - init_lots_2x) * 1000))
@@ -1208,7 +1197,7 @@ k60_overheated_peaking = (k60_j >= 75.0 and k60_j_delta < 0) and (twii_now >= tw
 
 def build_ai_snapshot_text():
     lines = [
-        f"【台股每日戰情室 v38.0 雙帳本真實獲利數據包】({now_str})",
+        f"【台股每日戰情室 v38.1 雙帳本真實獲利數據包】({now_str})",
         f"1. 大盤即時報價與位階：現價 {twii_now:,.1f}點 ({fleet['twii_chg_pct']:+.2f}% | 開盤 {twii_open:,.1f} / 最高 {fleet['twii_high']:,.1f} / 最低 {fleet['twii_low']:,.1f} / 昨收 {twii_prev_c:,.1f}) | 日20MA月線 {twii_ma20:,.1f} ({fleet['bias_20']:+.2f}%) | 日60MA季線 {twii_ma60:,.1f} ({fleet['bias_60']:+.2f}%) | 10週線 {twii_w_ma10:,.1f} | 5月線 {twii_m_ma5:,.1f}",
         f"2. 大盤日K與60分K (KDJ + DMI)：『日K』K={fleet['k9']}/D={fleet['d9']}/J={j_now}({j_trend_str}), DMI({dmi_d_str}) ｜ 『60分K』60m_K={k60_k}/60m_D={k60_d}/60m_J={k60_j}({k60_j_trend}), 60m_DMI({dmi_60_str}), 60分5MA={fleet['k60_ma5']:,.1f}",
         f"3. 母子艦隊雙帳本對照：『起始建倉基準』{init_lots_2x:.2f}張正2(@{init_cost_2x:.2f}) + {init_lots_1x:.2f}張0050(@{init_cost_1x:.2f}), 原始總本金={initial_capital:,}元 (若死抱不換股今日市值={hold_initial_val:,}元) ｜ 『當前實際持倉』{in_lots_2x:.2f}張正2(現價{p_2x:.2f}/均價{in_cost_2x:.2f}) + {in_lots_1x:.2f}張0050(現價{p_1x:.2f}/均價{in_cost_1x:.2f}), 當前總市值={total_fleet_val:,}元 ➔ 【真實累積總損益={true_total_pnl:+,}元 ({true_total_pnl_pct:+.2f}%)】、【換檔超額貢獻Alpha={switching_alpha:+,}元】、(券商帳面損益={broker_unrealized_pnl:+,}元, 已實現滾入成本獲利={realized_rolled_profit:+,}元)",
@@ -1305,28 +1294,18 @@ with tab1:
 
     st.markdown("---")
 
-    # ==========================================
-    # 🔄 新增【表 C：賣 0050 轉正2 ➔ 反彈賣正2 轉回 0050「雙向閉環獲利精算表」】
-    # 直接解答「如何從起始建倉到換回原本 0050 張數看出賺多少錢與多滾幾股」！
-    # ==========================================
     st.markdown("#### 🔄 表 C：【起始建倉 ➔ 賣 0050 轉正2 ➔ 反彈賣正2 轉回 0050】雙向閉環獲利精算表")
 
-    # 計算把「多出來的正2 (diff_shares_2x)」在各目標價賣出、並買回「少掉的 0050 (abs(diff_shares_1x))」後的閉環淨獲利
     extra_2x_shares = max(0, diff_shares_2x)
     short_1x_shares = max(0, -diff_shares_1x)
 
     def calc_roundtrip_row(stage_name, target_idx, target_p2x, target_p1x):
-        # 1. 當前換檔持倉在該點位之總市值
         val_curr_at_t = int(round(in_lots_2x * 1000 * target_p2x)) + int(round(in_lots_1x * 1000 * target_p1x)) + int(round(in_cash_pool))
-        # 2. 起始建倉若死抱不換股在該點位之總市值
-        val_init_at_t = int(round(init_lots_2x * 1000 * target_p2x)) + int(round(init_lots_1x * 1000 * target_p1x)) + int(round(init_cash))
-        # 3. 與起始建倉總本金 (initial_capital) 相比之真實總獲利
         true_profit_at_t = val_curr_at_t - initial_capital
         true_profit_pct = round((true_profit_at_t / max(1, initial_capital)) * 100, 2)
-        # 4. 賣出多增持之正2 (extra_2x_shares) 並買回少掉之 0050 (short_1x_shares) 恢復原始隊形後，口袋淨多出之現金 (扣除雙邊手續費與稅)
         sell_extra_2x_net = int(round(extra_2x_shares * target_p2x * (1.0 - 0.002425)))
         buyback_1x_cost = int(round(short_1x_shares * target_p1x * 1.001425))
-        net_ pocket_cash = sell_extra_2x_net - buyback_1x_cost + int(round(in_cash_pool - init_cash))
+        net_pocket_cash = sell_extra_2x_net - buyback_1x_cost + int(round(in_cash_pool - init_cash))
         free_2x_shares = int(round(net_pocket_cash / max(1.0, target_p2x)))
         return {
             "反彈轉回 0050 目標錨點": stage_name,
@@ -1334,7 +1313,7 @@ with tab1:
             "正2 / 0050 預估價": f"正2: {target_p2x:.2f}元 ｜ 0050: {target_p1x:.2f}元",
             "艦隊預計總市值": f"{val_curr_at_t:,} 元",
             "🏆 真實總獲利 (vs起始本金)": f"{true_profit_at_t:+,} 元 ({true_profit_pct:+.2f}%)",
-            "⚡ 閉環轉回原始隊形淨多賺 (Alpha)": f"換回 {short_1x_shares}股0050 後 ➔ 淨多賺 {net_pocket_cash:+,} 元 (或白賺 {free_2x_shares:+,} 股正2)"
+            "⚡ 閉環轉回原始隊形淨多賺 (Alpha)": f"賣 {extra_2x_shares}股正2 買回 {short_1x_shares}股0050 ➔ 淨多賺 {net_pocket_cash:+,} 元 (或白留 {free_2x_shares:+,} 股正2)"
         }
 
     df_roundtrip = pd.DataFrame([
@@ -1347,7 +1326,6 @@ with tab1:
     ])
     st.dataframe(df_roundtrip, use_container_width=True, hide_index=True)
 
-    # 額外提供「互動式換股模擬器」：可自由測試「若把 0050 再賣掉 300股 / 600股 轉成正2」的效果
     with st.expander("🧮 點此展開【自訂換股模擬器】（例如模擬：大盤反轉時把 0050 賣掉 600 股轉 0050正2，反彈轉回 0050 會賺多少？）", expanded=False):
         sim_c1, sim_c2, sim_c3, sim_c4 = st.columns(4)
         with sim_c1:
@@ -1406,7 +1384,7 @@ with tab1:
                 f"🟠 **【破線後之 60分K 跌深反彈警報】大盤目前位於季線 (`{twii_ma60:,.0f}`) 與 5月線 (`{twii_m_ma5:,.0f}`) 之下 (`{twii_now:,.1f} 點`)！**\n\n"
                 f"• **雙帳本實戰診斷**：\n"
                 f"  1. **【真實獲利底氣】**：雖然券商帳面顯示未實現 `{broker_unrealized_pnl:+,} 元`，但對比您的**起始建倉總本金 `{initial_capital:,} 元`**，您目前總市值 `{total_fleet_val:,} 元` **仍是真實正獲利 `{true_total_pnl:+,} 元 ({true_total_pnl_pct:+.2f}%)`**，且比死抱不換股多賺 **`{switching_alpha:+,} 元`**！\n"
-                f"  2. **【反彈轉回 0050 時機】**：目前 60分KDJ (`K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}`) 低檔金叉帶動跌深反彈，第一道反壓在 **5月線 `{twii_m_ma5:,.0f} 點`（正2約 `{t_m_ma5:.2f} 元`）**，第二道重壓在 **日60MA季線 `{twii_ma60:,.0f} 點`（正2約 `{t_ma60:.2f} 元`）**。當反彈至季線附近若 60分J 高檔彎頭，即可依上方【表 C】將增持之 `{extra_2x_shares} 股正2` 賣出換回 `{short_1x_shares} 股 0050`，鎖住約 **`+3,800 元`** 之換檔超額獲利！"
+                f"  2. **【反彈轉回 0050 時機】**：目前 60分KDJ (`K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}`) 低檔金叉帶動跌深反彈，第一道反壓在 **5月線 `{twii_m_ma5:,.0f} 點`（正2約 `{t_m_ma5:.2f} 元`）**，第二道重壓在 **日60MA季線 `{twii_ma60:,.0f} 點`（正2約 `{t_ma60:.2f} 元`）**。當反彈至季線附近若 60分J 高檔彎頭，即可依上方【表 C】將增持之 `{extra_2x_shares} 股正2` 賣出換回 `{short_1x_shares} 股 0050`，鎖住超額獲利！"
             )
         else:
             st.error(
@@ -1435,7 +1413,7 @@ with tab1:
             "日K戰區點位": f"{twii_ma60:,.1f} 點 (目前乖離 {fleet['bias_60']:+.2f}%)",
             "60分K 扣扳機條件": "跌破時反彈遇壓先減碼 ｜ 重新站回且 60分DMI(+DI>-DI) 才轉攻",
             "0050正2 目標價": f"{t_ma60:,.2f} 元 (高於您均價 {in_cost_2x:.2f}元)",
-            "實戰指令與滾股試算": f"反彈至 {t_ma60:.2f}元 即可將多出的1張正2轉回0050 (真實總獲利達 +8,450元)"
+            "實戰指令與滾股試算": f"反彈至 {t_ma60:.2f}元 即可將多出的 {extra_2x_shares}股正2 轉回 {short_1x_shares}股0050"
         },
         {
             "雙週期實戰錨點": "🛡️ 階段4：長線多頭最後防線 (月K 5月均線)",
