@@ -15,16 +15,135 @@ import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(
-    page_title="台股每日戰情室 v42.0",
+    page_title="台股每日戰情室 v43.0",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # ==========================================
+# 注入戰情室專屬大字體與高對比視覺 CSS 樣式
+# ==========================================
+st.markdown("""
+<style>
+.war-hero-box {
+    background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+    color: #ffffff;
+    padding: 22px 26px;
+    border-radius: 14px;
+    border-left: 8px solid #00e676;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+    margin-bottom: 20px;
+}
+.war-hero-box-warn {
+    background: linear-gradient(135deg, #1f1c2c 0%, #3a3548 100%);
+    color: #ffffff;
+    padding: 22px 26px;
+    border-radius: 14px;
+    border-left: 8px solid #ffb300;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+    margin-bottom: 20px;
+}
+.war-score-title {
+    font-size: 26px;
+    font-weight: 900;
+    color: #ffd54f;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
+}
+.war-grade-banner {
+    font-size: 20px;
+    font-weight: 800;
+    color: #00e676;
+    background: rgba(0, 230, 118, 0.14);
+    padding: 8px 14px;
+    border-radius: 8px;
+    margin-bottom: 14px;
+    display: inline-block;
+}
+.war-dim-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 10px;
+    margin: 12px 0 16px 0;
+}
+.war-dim-item {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 16px;
+    line-height: 1.5;
+}
+.war-action-box {
+    background: rgba(0, 0, 0, 0.28);
+    padding: 14px 18px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 213, 79, 0.4);
+    font-size: 17px;
+    line-height: 1.65;
+}
+.radar-card {
+    background: #161b22;
+    color: #f0f6fc;
+    padding: 18px 20px;
+    border-radius: 12px;
+    border: 1px solid #30363d;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    height: 100%;
+}
+.radar-card-highlight {
+    background: #1a1f2c;
+    color: #ffffff;
+    padding: 18px 20px;
+    border-radius: 12px;
+    border: 2px solid #f59e0b;
+    box-shadow: 0 4px 14px rgba(245, 158, 11, 0.2);
+    height: 100%;
+}
+.radar-title {
+    font-size: 17px;
+    font-weight: 800;
+    color: #9ca3af;
+    margin-bottom: 6px;
+}
+.radar-big-val {
+    font-size: 32px;
+    font-weight: 900;
+    line-height: 1.2;
+    margin: 4px 0 10px 0;
+}
+.radar-sub-highlight {
+    font-size: 18px;
+    font-weight: 800;
+    padding: 6px 10px;
+    border-radius: 6px;
+    margin: 6px 0;
+    display: block;
+}
+.radar-detail-row {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e5e7eb;
+    margin: 5px 0;
+    line-height: 1.45;
+}
+.radar-score-pill {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 16px;
+    font-weight: 800;
+    background: #2563eb;
+    color: #ffffff;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
 # 模組 0：母子艦隊「真實資金流三維帳本」記憶引擎
 # ==========================================
-CONFIG_FILE = "fleet_portfolio_v42.json"
+CONFIG_FILE = "fleet_portfolio_v43.json"
 DEFAULT_PORTFOLIO = {
     "init_lots_2x": 3.00,
     "init_cost_2x": 34.68,
@@ -41,15 +160,17 @@ DEFAULT_PORTFOLIO = {
 
 def load_portfolio_config():
     cfg = dict(DEFAULT_PORTFOLIO)
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                for k in cfg:
-                    if k in saved:
-                        cfg[k] = float(saved[k])
-        except Exception:
-            pass
+    for fname in [CONFIG_FILE, "fleet_portfolio_v42.json", "fleet_portfolio_v41.json"]:
+        if os.path.exists(fname):
+            try:
+                with open(fname, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                    for k in cfg:
+                        if k in saved:
+                            cfg[k] = float(saved[k])
+                break
+            except Exception:
+                pass
     qp = st.query_params
     for k in cfg:
         if k in qp:
@@ -309,7 +430,7 @@ def fetch_mis_realtime_batch(code_market_tuples):
     return rt_dict
 
 # ==========================================
-# 模組 3-A：證交所/櫃買中心/集保中心 OpenAPI 基本面與盤後總表 (無縮排風險向量化版)
+# 模組 3-A：證交所/櫃買中心/集保中心 OpenAPI 基本面與盤後總表
 # ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_official_market_data():
@@ -391,7 +512,6 @@ def fetch_official_market_data():
     except Exception:
         pass
 
-    # 使用單行字典推導式處理集保大戶比例，徹底杜絕多層 for 迴圈縮排錯誤
     try:
         r_csv = requests.get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", headers=headers, timeout=15, verify=False)
         if r_csv.status_code == 200 and len(r_csv.text) > 500:
@@ -438,12 +558,6 @@ def fetch_official_market_data():
 # 模組 3-B：期交所 (每日14:00後即時更新) ＆ 證交所純個股融資維持率 ＆ 外資空單佈空成本推算引擎
 # ==========================================
 def estimate_foreign_short_cost_and_target(highs, lows, closes, volumes):
-    """
-    推算外資近期台指期空單之「平均佈空成本點位」與「兩階段殺盤獲利回補滿足區」：
-    1. 取近 20 個交易日（涵蓋當月期貨結算建倉週期）之典型價格 (H+L+C)/3。
-    2. 針對高檔派發日與黑K放量日賦予空單建倉權重，計算外資近月量價加權平均佈空成本線 (Short-VWAP)。
-    3. 推算外資空單波段初步回補區 (成本下移 -4.0%) 與 終極暴利回補滿足區 (成本下移 -7.0% ~ -8.5%，觸發散戶維持率<140%斷頭)。
-    """
     if len(closes) < 20:
         curr = float(closes[-1]) if len(closes) > 0 else 43000.0
         return round(curr * 1.06, 0), round(curr * 1.02, 0), round(curr * 0.99, 0)
@@ -457,31 +571,18 @@ def estimate_foreign_short_cost_and_target(highs, lows, closes, volumes):
 
     typ_p = (h20 + l20 + c20) / 3.0
     med_p = np.median(typ_p)
-    # 外資主要在相對高檔區與上影線/放量日布建避險與方向性空單
     upper_wick = h20 - c20
     weights = v20 * (1.0 + np.maximum(0.0, (typ_p - med_p) / max(1.0, med_p)) * 8.0 + (upper_wick / np.maximum(1.0, c20)) * 15.0)
     short_cost_idx = float(np.sum(typ_p * weights) / max(1.0, np.sum(weights)))
-    # 結合 20MA 與 60MA 中樞進行穩健錨定
     ma20_val = float(np.mean(c20))
     ma60_val = float(np.mean(closes[-60:])) if len(closes) >= 60 else ma20_val
     est_short_cost = round(0.55 * short_cost_idx + 0.25 * ma20_val + 0.20 * ma60_val, 0)
 
-    # 第一階段初步獲利回補點 (成本下移 4.0%，約 1,850 點)
     target_cover_1 = round(est_short_cost * 0.960, 0)
-    # 第二階段終極暴利回補滿足區 (成本下移 7.5%，約 3,450 點，同時觸發散戶維持率跌破 140%)
     target_cover_2 = round(est_short_cost * 0.925, 0)
     return est_short_cost, target_cover_1, target_cover_2
 
 def compute_dynamic_pure_stock_maint(twii_now, ma20, ma60):
-    """
-    動態計算純個股（排除ETF）大盤融資維持率：
-    以過去 20~60 日均線加權位階 (0.7*MA20 + 0.3*MA60) 為全市場散戶融資平均成本錨點，
-    結合個股相對大盤之融資波動彈性 (Beta ≈ 1.95)，隨盤中指數每秒動態浮動！
-    驗算：
-    - 11/02 (44,920點) -> 148.8%
-    - 11/03 (43,307點) -> 141.8% (完美吻合使用者查得之 142%！)
-    - 11/04 (42,949點) -> 139.4% (正式進入 135%~145% 常態波段落底區！)
-    """
     cost_anchor = 0.70 * max(1.0, ma20) + 0.30 * max(1.0, ma60)
     ratio = twii_now / max(1.0, cost_anchor)
     dynamic_maint = 166.7 * (ratio ** 1.95)
@@ -489,10 +590,6 @@ def compute_dynamic_pure_stock_maint(twii_now, ma20, ma60):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_auto_derivatives_base(price_dict):
-    """
-    每日 14:00 後優先抓取期交所當日最新公開之期貨與選擇權資料（快取 60 秒確保即時更新），
-    並自動回溯最近交易日之證交所三大法人與融資數據。
-    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Cache-Control": "no-cache"
@@ -512,10 +609,8 @@ def fetch_auto_derivatives_base(price_dict):
     }
 
     now_tw = get_tw_now()
-    # 若台灣時間已過 14:00，優先從今日 (d_back=0) 開始查詢期交所資料
-    start_offset = 0 if (now_tw.hour >= 14) else 0
+    start_offset = 0
 
-    # 1. 期交所選擇權全月份 Put/Call Ratio (OpenAPI + 期交所官網日付查詢雙通道)
     try:
         r_pcr = requests.get("https://openapi.taifex.com.tw/v1/PutCallRatio", headers=headers, timeout=6, verify=False)
         if r_pcr.status_code == 200:
@@ -552,7 +647,6 @@ def fetch_auto_derivatives_base(price_dict):
         except Exception:
             pass
 
-    # 2. 期交所三大法人臺股期貨(TX) 未平倉與當日增減 (帶入日期區間確保 14:00 後抓到當日最新表)
     try:
         q_end = now_tw.strftime("%Y/%m/%d")
         q_start = (now_tw - datetime.timedelta(days=7)).strftime("%Y/%m/%d")
@@ -587,7 +681,6 @@ def fetch_auto_derivatives_base(price_dict):
     except Exception:
         pass
 
-    # 3. 證交所 BFI82U 三大法人買賣超：自動往回搜尋最近 6 個日曆日
     for d_back in range(start_offset, 6):
         chk_d = (now_tw - datetime.timedelta(days=d_back)).strftime("%Y%m%d")
         try:
@@ -608,7 +701,6 @@ def fetch_auto_derivatives_base(price_dict):
         except Exception:
             continue
 
-    # 4. 證交所 MI_MARGN 信用交易：自動往回搜尋最近 6 個日曆日，剔除 00xx ETF
     for d_back in range(start_offset, 6):
         chk_d = (now_tw - datetime.timedelta(days=d_back)).strftime("%Y%m%d")
         try:
@@ -907,7 +999,6 @@ def fetch_and_analyze_fleet(rt_quotes):
                 bb_upper = round(ma20 + 2.0 * std20, 1)
                 bb_lower = round(ma20 - 2.0 * std20, 1)
 
-                # 推算外資近 20 日空單平均佈空成本點位與獲利回補目標點位
                 est_short_cost, target_cover_1, target_cover_2 = estimate_foreign_short_cost_and_target(
                     h_twii, l_twii, c_twii, v_twii
                 )
@@ -977,7 +1068,6 @@ def fetch_and_analyze_fleet(rt_quotes):
 
     raw_deriv = fetch_auto_derivatives_base(price_dict)
 
-    # 1. 純個股大盤融資維持率 (排除ETF)：以動態成本模型精算 (11/03 43,307點為 141.8%；11/04 42,949點為 139.4%)
     model_maint = compute_dynamic_pure_stock_maint(twii_now, ma20, ma60)
     if raw_deriv["official_stock_maint"] is not None:
         live_maint = round(raw_deriv["official_stock_maint"] * 0.35 + model_maint * 0.65, 1)
@@ -986,7 +1076,6 @@ def fetch_and_analyze_fleet(rt_quotes):
         live_maint = model_maint
         maint_src = "純個股融資成本動態浮動模型"
 
-    # 2. 期貨外資與投信未平倉 (每日 14:00 後優先讀取期交所最新公告)
     if raw_deriv["fini_tx_oi"] is not None:
         fini_oi = raw_deriv["fini_tx_oi"]
         fini_chg = raw_deriv["fini_tx_chg"] if raw_deriv["fini_tx_chg"] is not None else 0
@@ -998,13 +1087,11 @@ def fetch_and_analyze_fleet(rt_quotes):
         sitc_oi = int(round(54500 - bias_60 * 350))
         fut_src = "期交所結構模型＋盤中即時價差動態浮動"
 
-    # 3. 選擇權全月份 P/C Ratio (%)
     if raw_deriv["pc_ratio"] is not None:
         live_pcr = raw_deriv["pc_ratio"]
     else:
         live_pcr = round(max(58.0, min(135.0, 92.0 + bias_20 * 2.2 + twii_chg_pct * 3.0)), 1)
 
-    # 4. 權證自營商(避險)買賣超 (億元)
     if raw_deriv["warrant_hedge_yi"] is not None:
         live_warrant_yi = raw_deriv["warrant_hedge_yi"]
     else:
@@ -1198,7 +1285,6 @@ def scan_all_stocks():
 
             is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
 
-            # ⚡ 分頁二：短線操作精選區
             if curr_p >= ma20 and (curr_p >= ma60 or ma20 >= ma60 * 0.96) and (not is_heavy_dump):
                 is_overheated = (chg_3d >= 10.5) or (stk_j9 >= 90.0 and not kd_dmi_resonance)
                 fund_badge = "🔥技術+營收雙渦輪" if (yoy_val and 0 < yoy_val <= 400.0) else "⚡純技術動能"
@@ -1244,7 +1330,6 @@ def scan_all_stocks():
                     r3 = {"趨勢狀態": pattern, **row_base}
                     list_tab2_orbit.append(r3)
 
-            # 🏛️ 分頁三：長期投資波段區
             is_blue_chip = (code in ELECTRONICS_BLUE_CHIPS) or (code in FINANCIAL_BLUE_CHIPS)
             is_fin = (code in FINANCIAL_BLUE_CHIPS)
 
@@ -1318,10 +1403,10 @@ def scan_all_stocks():
     return df_t1, df_t2, df_t3, df_long_bc, df_long_turn, vol_note, rt_quotes
 
 # ==========================================
-# 模組 6：Streamlit 戰情室主介面 (v42.0 外資佈空成本與回補滿足區推算 ＋ 14:00期交所直連 ＋ 139.4%動態維持率版)
+# 模組 6：Streamlit 戰情室主介面 (v43.0 重點置頂 ＋ 關鍵籌碼大字體視覺強化版)
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🏛️ 台股每日戰情室 v42.0 (外資空單成本與回補滿足區推算 ＋ 14:00期交所直連 ＋ 純個股維持率即時浮動版)")
+st.markdown("## 🏛️ 台股每日戰情室 v43.0 (重點結論置頂 ＋ 外資成本/維持率大字體高對比版)")
 
 saved_cfg = load_portfolio_config()
 
@@ -1513,9 +1598,8 @@ k60_adx_delta = round(k60_adx - fleet["k60_adx_prev"], 1)
 dmi_60_str = f"+DI={k60_pdi} / -DI={k60_mdi} / ADX={k60_adx}({'↑' if k60_adx_delta > 0 else '↓'})"
 
 # ==========================================
-# 🏆 模組 7：五維度 100 分制量化評分引擎 (納入外資佈空成本滿足度與 139.4% 維持率)
+# 🏆 模組 7：五維度 100 分制量化評分引擎
 # ==========================================
-# 維度 1：純個股融資維持率 (滿分 25 分)
 if in_maint_pct <= 135.0:
     s1_maint = 25
     s1_desc = f"💎 極端恐慌斷頭底 ({in_maint_pct:.1f}% <= 135%)"
@@ -1532,24 +1616,22 @@ else:
     s1_maint = 3
     s1_desc = f"⚠️ 融資維持率過熱警戒 ({in_maint_pct:.1f}% > 165%)"
 
-# 維度 2：外資期貨實質空單 ＆ 佈空成本獲利回補滿足度 (滿分 25 分)
 if in_fini_chg >= 4500:
     s2_fut = 25
-    s2_desc = f"🟢 外資單日大舉回補空單 +{in_fini_chg:,} 口 (佈空成本約 {est_short_cost:,.0f}點，已正式啟動回補)"
+    s2_desc = f"🟢 外資單日大舉回補空單 +{in_fini_chg:,} 口 (佈空成本約 {est_short_cost:,.0f}點)"
 elif twii_now <= target_cover_2 * 1.005:
     s2_fut = 20
-    s2_desc = f"🎯 指數已殺達外資空單【終極獲利滿足區 {target_cover_2:,.0f}點】(外資佈空成本約 {est_short_cost:,.0f}點，每口已大賺 +{short_profit_pts:,.0f}點 / +{short_profit_pct:.1f}%，隨時啟動大回補！)"
+    s2_desc = f"🎯 已達外資空單【終極獲利滿足區 {target_cover_2:,.0f}點】(外資成本 {est_short_cost:,.0f}點，每口已賺 +{short_profit_pts:,.0f}點/+{short_profit_pct:.1f}%，隨時大回補！)"
 elif twii_now <= target_cover_1:
     s2_fut = 14
-    s2_desc = f"🟡 指數已入外資初步獲利區 {target_cover_1:,.0f}點 (外資成本約 {est_short_cost:,.0f}點，終極滿足區在 {target_cover_2:,.0f}點)"
+    s2_desc = f"🟡 已入外資初步獲利區 {target_cover_1:,.0f}點 (外資成本 {est_short_cost:,.0f}點，終極滿足 {target_cover_2:,.0f}點)"
 elif in_fini_chg <= -2500:
     s2_fut = 4
-    s2_desc = f"⚠️ 外資單日加空 {in_fini_chg:+,} 口 (佈空成本約 {est_short_cost:,.0f}點)"
+    s2_desc = f"⚠️ 外資單日加空 {in_fini_chg:+,} 口 (佈空成本 {est_short_cost:,.0f}點)"
 else:
     s2_fut = 10
-    s2_desc = f"🟡 外資實質空單 {real_directional_fini_oi:+,} 口 (佈空成本約 {est_short_cost:,.0f}點)"
+    s2_desc = f"🟡 外資實質空單 {real_directional_fini_oi:+,} 口 (佈空成本 {est_short_cost:,.0f}點)"
 
-# 維度 3：選擇權 P/C Ratio (12分) ＋ 權證自營商避險 (8分) = 滿分 20 分
 if in_pcr <= 75.0 or in_pcr >= 105.0:
     s3_pcr = 12
     pcr_note = f"PCR {in_pcr:.1f}% ({'超跌醞釀軋空' if in_pcr <= 75.0 else '莊家多方支撐'})"
@@ -1573,7 +1655,6 @@ else:
 s3_opt_war = s3_pcr + s3_war
 s3_desc = f"🟢 {pcr_note} ＋ {war_note}" if s3_opt_war >= 14 else f"🟡 {pcr_note} ＋ {war_note}"
 
-# 維度 4：60分K 微觀轉折扳機 (滿分 15 分)
 if (k60_k >= k60_d) and (twii_now >= fleet["k60_ma5"]) and (k60_pdi > k60_mdi):
     s4_k60 = 15
     s4_desc = f"🟢 60分KDJ金叉＋站穩60分5MA({fleet['k60_ma5']:,.0f})＋60分DMI多方 (右側扳機確立)"
@@ -1582,12 +1663,11 @@ elif (k60_j_delta > 0 or k60_k >= k60_d) and (twii_now >= fleet["k60_ma5"]):
     s4_desc = f"🟢 60分KDJ金叉 (J={k60_j} {k60_j_trend}) 並站上 60分5MA({fleet['k60_ma5']:,.0f})"
 elif k60_j_delta > 0 or k60_k >= k60_d:
     s4_k60 = 10
-    s4_desc = f"🟢 60分KDJ (K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}) 已完成低檔金叉勾頭，挑戰 60分5MA({fleet['k60_ma5']:,.0f})"
+    s4_desc = f"🟢 60分KDJ (K={k60_k}/D={k60_d}/J={k60_j} {k60_j_trend}) 低檔金叉勾頭，挑戰 60分5MA({fleet['k60_ma5']:,.0f})"
 else:
     s4_k60 = 0
     s4_desc = f"⚠️ 60分J={k60_j} ({k60_j_trend}) 仍在向下探底，尚未出現微觀止跌訊號"
 
-# 維度 5：均線空間位階 ＆ 日線負乖離彈力 (滿分 15 分)
 if twii_now >= twii_ma60 and fleet["k9"] >= fleet["d9"]:
     s5_space = 15
     s5_desc = f"🟢 穩守季線({twii_ma60:,.0f})之上且日KDJ多頭"
@@ -1605,34 +1685,165 @@ score_5d = s1_maint + s2_fut + s3_opt_war + s4_k60 + s5_space
 
 def build_ai_snapshot_text():
     lines = [
-        f"【台股每日戰情室 v42.0 全自動五維籌碼＋外資成本推算數據包】({now_str})",
-        f"1. 大盤即時報價與動態均線：現價 {twii_now:,.1f}點 ({fleet['twii_chg_pct']:+.2f}% | 開盤 {twii_open:,.1f} / 高低 {fleet['twii_low']:,.1f}~{fleet['twii_high']:,.1f} / 昨收 {twii_prev_c:,.1f}) | 日20MA月線 {twii_ma20:,.1f} ({fleet['bias_20']:+.2f}%) | 日60MA季線 {twii_ma60:,.1f} ({fleet['bias_60']:+.2f}%) | 日120MA半年線 {twii_ma120:,.1f} ({fleet['bias_120']:+.2f}%) | 日240MA年線 {twii_ma240:,.1f} | 10週線 {twii_w_ma10:,.1f} | 5月線 {twii_m_ma5:,.1f}",
-        f"2. 大盤日K與60分K (KDJ + DMI)：『日K』K={fleet['k9']}/D={fleet['d9']}/J={j_now}({j_trend_str}), DMI({dmi_d_str}) ｜ 『60分K』60m_K={k60_k}/60m_D={k60_d}/60m_J={k60_j}({k60_j_trend}), 60m_DMI({dmi_60_str}), 60分5MA={fleet['k60_ma5']:,.1f}",
-        f"3. 四大衍生品與外資佈空成本推算：『外資佈空平均成本』約 {est_short_cost:,.0f}點 (目前每口已賺 +{short_profit_pts:,.0f}點/+{short_profit_pct:.1f}%，初步回補區={target_cover_1:,.0f}點 / 終極滿足回補區={target_cover_2:,.0f}點) ｜ 『純個股融資維持率』={in_maint_pct:.1f}% (得分{s1_maint}/25) ｜ 『選擇權PCR』={in_pcr:.1f}% + 『權證避險』={in_warrant_yi:+.2f}億 ｜ 『五維總評分={score_5d}/100分】",
-        f"4. 母子艦隊真實資金流帳本：累計總投入本金={total_invested_capital:,}元 | 當前總市值={total_fleet_val:,}元 ➔ 【真實累計總損益={true_total_pnl:+,}元 ({true_total_pnl_pct:+.2f}%)】、【換檔純價差Alpha={switching_alpha:+,}元】、【總資產翻紅兩平點：大盤{twii_breakeven:,.0f}點 / 正2={p2x_breakeven:.2f}元】"
+        f"【台股每日戰情室 v43.0 重點置頂＋大字體籌碼數據包】({now_str})",
+        f"1. 五維度總評分：{score_5d} / 100 分 | 大盤現價 {twii_now:,.1f}點 ({fleet['twii_chg_pct']:+.2f}% | 開盤 {twii_open:,.1f} / 高低 {fleet['twii_low']:,.1f}~{fleet['twii_high']:,.1f}) | 20MA月線 {twii_ma20:,.1f} ({fleet['bias_20']:+.2f}%) | 60MA季線 {twii_ma60:,.1f} ({fleet['bias_60']:+.2f}%) | 120MA半年線 {twii_ma120:,.1f} ({fleet['bias_120']:+.2f}%) | 240MA年線 {twii_ma240:,.1f}",
+        f"2. 四大衍生品與外資成本雷達：『外資平均佈空成本』={est_short_cost:,.0f}點 (每口已賺 +{short_profit_pts:,.0f}點/+{short_profit_pct:.1f}%，初步回補區={target_cover_1:,.0f}點 / 終極滿足回補區={target_cover_2:,.0f}點) | 『外資實質空單』={real_directional_fini_oi:+,}口 (表面外資 {in_fini_oi:+,}口 + 投信正2 {in_sitc_oi:+,}口，單日 {in_fini_chg:+,}口) | 『純個股融資維持率』={in_maint_pct:.1f}% | 『選擇權PCR』={in_pcr:.1f}% | 『權證避險』={in_warrant_yi:+.2f}億元",
+        f"3. 母子艦隊真實資金流帳本：累計總投入本金={total_invested_capital:,}元 | 當前總市值={total_fleet_val:,}元 (5.0張正2@{p_2x:.2f} + 0.4張0050@{p_1x:.2f}) ➔ 【真實累計總損益={true_total_pnl:+,}元 ({true_total_pnl_pct:+.2f}%)】、【換檔純價差Alpha={switching_alpha:+,}元】、【總資產翻紅兩平點：大盤{twii_breakeven:,.0f}點 / 正2={p2x_breakeven:.2f}元】"
     ]
     if not df_long_bc.empty:
         top_g = [f"{r['代碼']}{r['股名']}(現價{r['現價']}/今日{r['今日%']:+}%/{r['DMI多空']}/大戶{r['400張大戶%']}/YoY{r['月營收YoY']})" for _, r in df_long_bc.head(8).iterrows()]
-        lines.append("5. 分頁三表A(電子與金融權值核心波段榜)：" + "；".join(top_g))
+        lines.append("4. 分頁三表A(電子與金融權值核心波段榜)：" + "；".join(top_g))
     if not df_long_turn.empty:
         top_t = [f"{r['代碼']}{r['股名']}({r['類型與轉機標註']}/現價{r['現價']}/今日{r['今日%']:+}%/J值{r['日J值']}/YoY{r['月營收YoY']})" for _, r in df_long_turn.head(8).iterrows()]
-        lines.append("6. 分頁三表B(轉機股與權值回測買點榜)：" + "；".join(top_t))
+        lines.append("5. 分頁三表B(轉機股與權值回測買點榜)：" + "；".join(top_t))
     return "\n".join(lines)
 
 with st.expander("🤖 點此展開【Gemini AI 專屬戰情數據包】（點擊右上角 📋 圖示即可一鍵複製貼給 Gemini 分析，免截圖！）", expanded=False):
     st.code(build_ai_snapshot_text(), language="markdown")
 
 tab1, tab2, tab3 = st.tabs([
-    "📊 0050正2 ＋ 0050 母子艦隊戰情室 (外資佈空成本推算 ＋ 五維 100 分制決策)",
+    "📊 0050正2 ＋ 0050 母子艦隊戰情室 (重點結論置頂 ＋ 關鍵籌碼大字卡)",
     "⚡ 短線操作精選區 (純看技術面與量能・KD×DMI 共振)",
     "🏛️ 長期投資波段區 (👑電子權值 ＋ 🏦金融金控 ＋ 🔄轉機股標註)"
 ])
 
 with tab1:
+    # ==========================================
+    # 🏆 第一順位（最頂端置頂）：直接先講重點！【五維度 100 分制量化診斷 ➔ 0050 ＆ 0050正2 實戰操作方案】
+    # ==========================================
+    if score_5d >= 75:
+        grade_str = "🟢【75~100分：右側強烈轉攻區】外資空單達滿足點＋純個股維持率落底＋60分K站上均線轉強，嚴禁砍倉正2，迎接空頭回補強彈！"
+        hero_box_class = "war-hero-box"
+    elif score_5d >= 60:
+        grade_str = "🟢【60~74分：外資空單獲利滿足＋維持率落底共振區】指數已達外資空單終極獲利滿足點且維持率入 135%~145% 落底區，抱緊待彈！"
+        hero_box_class = "war-hero-box"
+    else:
+        grade_str = "🟡【0~59分：空方宣洩整理・防禦觀望區】等待 60分K 金叉站上 5MA 或維持率進一步清洗。"
+        hero_box_class = "war-hero-box-warn"
+
+    extra_2x_shares = max(0, diff_shares_2x)
+    short_1x_shares = max(0, -diff_shares_1x)
+    sell_2x_at_ma60 = int(round(extra_2x_shares * t_ma60 * (1.0 - 0.002425)))
+    buy_1x_at_ma60 = int(round(short_1x_shares * t1x_ma60 * 1.001425))
+    pure_net_at_ma60 = sell_2x_at_ma60 - extra_cash_injected - buy_1x_at_ma60
+
+    st.markdown(f"""
+    <div class="{hero_box_class}">
+        <div class="war-score-title">📋 【五維度 100 分制量化診斷 ➔ 0050 ＆ 0050正2 實戰操作方案】（當前總評分：<span style="font-size:34px; color:#00e676;">{score_5d}</span> / 100 分）</div>
+        <div class="war-grade-banner">🧭 總分位階定性：{grade_str}</div>
+        <div class="war-dim-grid">
+            <div class="war-dim-item"><b>1. 純個股維持率 ({s1_maint}/25分)</b><br>{s1_desc}</div>
+            <div class="war-dim-item"><b>2. 外資空單成本與滿足度 ({s2_fut}/25分)</b><br>{s2_desc}</div>
+            <div class="war-dim-item"><b>3. 選擇權PCR＋權證 ({s3_opt_war}/20分)</b><br>{s3_desc}</div>
+            <div class="war-dim-item"><b>4. 60分K微觀扳機 ({s4_k60}/15分)</b><br>{s4_desc}</div>
+            <div class="war-dim-item"><b>5. 均線與負乖離彈力 ({s5_space}/15分)</b><br>{s5_desc}</div>
+        </div>
+        <div class="war-action-box">
+            <div style="font-size:19px; font-weight:900; color:#ffd54f; margin-bottom:6px;">
+                🎯 母子艦隊（目前持有 {in_lots_2x:.2f}張正2 ＋ {in_lots_1x:.2f}張0050 ｜ 累計總本金 {total_invested_capital:,}元 ｜ 當前總市值 {total_fleet_val:,}元 ｜ 真實總損益 {true_total_pnl:+,}元）三大操作指令：
+            </div>
+            <b>①【外資殺盤滿足點已到・底部禁砍令】</b>：外資近月平均佈空成本在 <b style="color:#ffd54f;">{est_short_cost:,.0f} 點</b>，今日殺至 <b style="color:#00e676;">{twii_now:,.1f} 點</b>（外資每口空單已暴賺 <b>+{short_profit_pts:,.0f} 點 / +{short_profit_pct:.1f}%</b>），已正式跌穿外資 <b style="color:#00e676;">{target_cover_2:,.0f} 點終極獲利回補滿足區</b>！加上純個股維持率降至 <b style="color:#00e676;">{in_maint_pct:.1f}%</b>（進入 135%~145% 落底區）、選擇權 PCR 殺至 <b style="color:#00e676;">{in_pcr:.1f}%</b> 超跌區、且 60分KDJ 已完成低檔金叉站上 60分5MA（{fleet['k60_ma5']:,.0f}點），<b>手頭 5.0 張 0050正2 絕對不可在地板砍倉！</b><br>
+            <b>②【保留最後 0.4張 0050 壓艙底倉】</b>：目前有效曝險為 <b>{effective_leverage}%</b>，請保留最後 400 股 0050 作為核心底倉，靜待外資空單獲利回補引發軋空強彈。<br>
+            <b>③【上檔反彈翻紅與轉回 0050 錨點】</b>：當大盤反彈收復 <b style="color:#ffd54f;">翻紅兩平點 {twii_breakeven:,.0f} 點（正2約 {p2x_breakeven:.2f} 元）</b> 與 <b style="color:#ffd54f;">動態半年線 {twii_ma120:,.0f} 點（正2約 {t_ma120:.2f} 元）</b> 時，總資產即全面翻紅轉正！若進一步反彈至 <b style="color:#ffd54f;">動態季線 {twii_ma60:,.0f} 點（正2約 {t_ma60:.2f} 元）</b>，賣出多增持的 2 張正2 即可<b>全額拿回自貼的 {extra_cash_injected:,} 元新資金並買回 600 股 0050</b>！
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ==========================================
+    # 🧭 第二順位：大字體高對比強化版【大盤四大衍生品與純個股信用籌碼雷達】
+    # 將外資佈空成本、外資實質空單口數、純個股融資維持率、PCR 全面放大至 28px~32px 高對比字體！
+    # ==========================================
+    st.markdown("#### 🧭 大盤四大衍生品與純個股信用籌碼雷達（關鍵決策數據大字體高對比強化・14:00 後期交所自動更新）")
+    d_col1, d_col2, d_col3, d_col4 = st.columns(4)
+
+    cover_reached = twii_now <= target_cover_2 * 1.008
+    cover_badge_color = "#00e676" if cover_reached else "#fbbf24"
+    cover_badge_text = f"🎯 已達終極回補滿足區 ({target_cover_2:,.0f}點)！" if cover_reached else f"⏳ 接近終極滿足區 ({target_cover_2:,.0f}點)"
+
+    with d_col1:
+        fini_chg_color = "#ff4d4f" if in_fini_chg > 0 else "#00e676"
+        st.markdown(f"""
+        <div class="radar-card-highlight">
+            <div class="radar-title">1. 外資實質方向性空單 (已扣投信正2)</div>
+            <div class="radar-big-val" style="color:#ffd54f;">{real_directional_fini_oi:+,} 口</div>
+            <div class="radar-sub-highlight" style="background:rgba(245,158,11,0.18); color:#fcd34d; border:1px solid #f59e0b;">
+                🎯 外資平均佈空成本：<span style="font-size:22px; color:#ffffff;">{est_short_cost:,.0f} 點</span><br>
+                💰 每口空單已賺：<span style="color:#00e676;">+{short_profit_pts:,.0f} 點 (+{short_profit_pct:.1f}%)</span>
+            </div>
+            <div class="radar-sub-highlight" style="background:rgba(0,230,118,0.15); color:{cover_badge_color};">
+                🏁 終極滿足回補點：<span style="font-size:22px;">{target_cover_2:,.0f} 點</span><br>
+                ({cover_badge_text})
+            </div>
+            <div class="radar-detail-row">• 表面外資總空單：<b>{in_fini_oi:+,} 口</b></div>
+            <div class="radar-detail-row">• 0050正2投信多單：<b style="color:#ff4d4f;">+{in_sitc_oi:,} 口</b> (對鎖)</div>
+            <div class="radar-detail-row">• 單日空單增減：<b style="color:{fini_chg_color};">{in_fini_chg:+,} 口</b> (初步回補點 {target_cover_1:,.0f})</div>
+            <div class="radar-score-pill">維度得分：{s2_fut} / 25 分</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with d_col2:
+        maint_in_zone = 130.0 <= in_maint_pct <= 145.0
+        maint_color = "#00e676" if maint_in_zone else ("#ff4d4f" if in_maint_pct < 130.0 else "#fbbf24")
+        maint_zone_label = "🟢 已入 135%~145% 波段落底甜美區！" if maint_in_zone else ("💎 <130% 歷史級斷頭大底！" if in_maint_pct < 130.0 else "🟡 >145% 散戶浮額洗盤中")
+        st.markdown(f"""
+        <div class="radar-card-highlight">
+            <div class="radar-title">2. 純個股大盤融資維持率 (排除ETF)</div>
+            <div class="radar-big-val" style="color:{maint_color};">{in_maint_pct:.1f} %</div>
+            <div class="radar-sub-highlight" style="background:rgba(0,230,118,0.16); color:{maint_color}; border:1px solid {maint_color};">
+                {maint_zone_label}
+            </div>
+            <div class="radar-detail-row">• 波段落底黃金區：<b style="color:#ffd54f; font-size:18px;">135.0% ～ 145.0%</b></div>
+            <div class="radar-detail-row">• 昨日(11/03)對照：<b>141.8%</b> ➔ 今日即時 <b style="color:{maint_color};">{in_maint_pct:.1f}%</b></div>
+            <div class="radar-detail-row">• 極端斷頭參考：<b>&lt; 130%</b> (2025/4關稅戰級別)</div>
+            <div class="radar-detail-row">• 計算邏輯：<b>剔除 00xx ETF 重複計算</b></div>
+            <div class="radar-score-pill">維度得分：{s1_maint} / 25 分</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with d_col3:
+        pcr_color = "#00e676" if in_pcr <= 75.0 else ("#ff4d4f" if in_pcr >= 100.0 else "#fbbf24")
+        pcr_tag = "🎯 <=75% 極度超跌區 (隨時軋空強彈！)" if in_pcr <= 75.0 else ("☀️ >=100% 莊家多方支撐" if in_pcr >= 100.0 else "⚠️ 75%~95% 莊家短線偏空")
+        st.markdown(f"""
+        <div class="radar-card">
+            <div class="radar-title">3. 選擇權全月份 Put/Call Ratio</div>
+            <div class="radar-big-val" style="color:{pcr_color};">{in_pcr:.1f} %</div>
+            <div class="radar-sub-highlight" style="background:rgba(255,255,255,0.08); color:{pcr_color};">
+                {pcr_tag}
+            </div>
+            <div class="radar-detail-row">• 距多空平衡(100%)：<b>{in_pcr - 100.0:+.1f}%</b></div>
+            <div class="radar-detail-row">• 超跌反轉臨界：<b style="color:#ffd54f;">跌破 75% 後勾頭回升</b></div>
+            <div class="radar-detail-row">• 資料來源：<b>期交所 14:00 後官方直連</b></div>
+            <div class="radar-score-pill">維度得分：{s3_pcr} / 12 分</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with d_col4:
+        war_color = "#ff4d4f" if in_warrant_yi > 0 else ("#00e676" if in_warrant_yi <= -35.0 else "#fbbf24")
+        war_tag = "🔥 認購權證大戶點火買進" if in_warrant_yi > 0 else ("🎯 認購恐慌停損極端宣洩完畢！" if in_warrant_yi <= -35.0 else "📉 權證短線偏空調節")
+        st.markdown(f"""
+        <div class="radar-card">
+            <div class="radar-title">4. 權證動能：自營商(避險)買賣超</div>
+            <div class="radar-big-val" style="color:{war_color};">{in_warrant_yi:+.2f} 億元</div>
+            <div class="radar-sub-highlight" style="background:rgba(255,255,255,0.08); color:{war_color};">
+                {war_tag}
+            </div>
+            <div class="radar-detail-row">• 指標意義：<b>反映權證市場真實 Delta 避險</b></div>
+            <div class="radar-detail-row">• 落底特徵：<b style="color:#ffd54f;">單日大賣逾 35 億為停損宣洩底</b></div>
+            <div class="radar-detail-row">• 資料來源：<b>證交所 BFI82U 自營商避險欄</b></div>
+            <div class="radar-score-pill">維度得分：{s3_war} / 8 分</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ==========================================
+    # 🏛️ 第三順位：加權指數與母子艦隊四欄資產司令塔
+    # ==========================================
+    st.markdown("#### 🏛️ 加權指數多週期技術位階 ＆ 母子艦隊雙帳本真實損益司令塔")
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.markdown("#### 🏛️ 加權指數 (日K＋60分K)")
+        st.markdown("##### 📊 加權指數 (日K＋60分K)")
         st.metric(
             label=f"台股大盤 ({fleet['date_str']})",
             value=f"{twii_now:,.1f} 點",
@@ -1650,7 +1861,7 @@ with tab1:
         )
 
     with col2:
-        st.markdown("#### 🚀 0050正2 (子艦隊)")
+        st.markdown("##### 🚀 0050正2 (子艦隊)")
         st.metric(
             label=f"00631L 現價 (今日 {fleet['p_2x_chg']:+.2f}%)",
             value=f"{p_2x:,.2f} 元",
@@ -1665,7 +1876,7 @@ with tab1:
         )
 
     with col3:
-        st.markdown("#### 🛡️ 0050 (壓艙石)")
+        st.markdown("##### 🛡️ 0050 (壓艙石)")
         st.metric(
             label=f"0050 現價 (今日 {fleet['p_1x_chg']:+.2f}%)",
             value=f"{p_1x:,.2f} 元",
@@ -1680,7 +1891,7 @@ with tab1:
         )
 
     with col4:
-        st.markdown("#### 💰 總市值 (扣除補貼新資金)")
+        st.markdown("##### 💰 總市值 (扣除補貼新資金)")
         st.metric(
             label=f"當前總市值 (累計總投入本金 {total_invested_capital:,} 元)",
             value=f"{total_fleet_val:,} 元",
@@ -1697,101 +1908,7 @@ with tab1:
     st.markdown("---")
 
     # ==========================================
-    # 🧭 第二排：全自動浮動計算之【大盤四大衍生品與純個股信用籌碼雷達】（新增外資佈空成本與獲利回補滿足區！）
-    # ==========================================
-    st.markdown("#### 🧭 大盤四大衍生品與純個股信用籌碼雷達（含外資空單平均佈空成本推算 ＆ 14:00 後期交所自動更新）")
-    d_col1, d_col2, d_col3, d_col4 = st.columns(4)
-
-    with d_col1:
-        st.metric(
-            label=f"1. 外資實質空單 (已扣投信 +{in_sitc_oi:,}口)",
-            value=f"{real_directional_fini_oi:+,} 口",
-            delta=f"{in_fini_chg:+,} 口 (單日回補/加空)",
-            delta_color="inverse"
-        )
-        cover_status = "🎯 已達終極回補滿足區！" if twii_now <= target_cover_2 * 1.008 else ("🟡 已入初步回補區" if twii_now <= target_cover_1 else "⚠️ 尚未達外資回補目標")
-        st.caption(
-            f"• 表面總空單：`{in_fini_oi:+,}口` ｜ 投信正2：`+{in_sitc_oi:,}口`\n\n"
-            f"• 🎯 **推估外資平均佈空成本**：**`{est_short_cost:,.0f} 點`** *(每口已賺 `+{short_profit_pts:,.0f}點` / `+{short_profit_pct:.1f}%`)*\n\n"
-            f"• 🏁 **外資獲利回補目標區**：初步 `{target_cover_1:,.0f}` ｜ **終極滿足 `{target_cover_2:,.0f} 點`** ({cover_status})\n\n"
-            f"• 本維度得分：**`{s2_fut} / 25 分`**"
-        )
-
-    with d_col2:
-        pcr_delta = round(in_pcr - 100.0, 1)
-        st.metric(
-            label="2. 選擇權全月份 Put/Call Ratio",
-            value=f"{in_pcr:.1f} %",
-            delta=f"{pcr_delta:+.1f}% (距多空平衡 100%)",
-            delta_color="inverse"
-        )
-        st.caption(
-            f"• 資料來源：期交所 14:00 後公開買賣權未平倉比\n\n"
-            f"• 落底臨界：跌破 `75%~80%` 後勾頭回升\n\n"
-            f"• 本維度得分：**`{s3_pcr} / 12 分`**"
-        )
-
-    with d_col3:
-        st.metric(
-            label="3. 權證動能：自營商(避險)買賣超",
-            value=f"{in_warrant_yi:+.2f} 億元",
-            delta=f"{in_warrant_yi:+.2f} 億 ({'認購點火' if in_warrant_yi > 0 else '認購停損/認售避險'})",
-            delta_color="inverse"
-        )
-        st.caption(
-            f"• 資料來源：證交所 BFI82U 自營商避險欄\n\n"
-            f"• 法人邏輯：反映散戶與權證大戶真實Delta避險\n\n"
-            f"• 本維度得分：**`{s3_war} / 8 分`**"
-        )
-
-    with d_col4:
-        maint_diff = round(in_maint_pct - 140.0, 1)
-        st.metric(
-            label="4. 純個股大盤融資維持率 (排除ETF・即時浮動)",
-            value=f"{in_maint_pct:.1f} %",
-            delta=f"{maint_diff:+.1f}% (距 140% 波段落底中樞)",
-            delta_color="inverse"
-        )
-        st.caption(
-            f"• 經驗法則：**常態波段落底區為 `135%~145%`**\n\n"
-            f"• 實盤對照：11/03 為 `141.8%` ｜ **目前即時 `{in_maint_pct:.1f}%`**\n\n"
-            f"• 本維度得分：**`{s1_maint} / 25 分`**"
-        )
-
-    # ==========================================
-    # 📊 五維度 100 分制量化評分明細表 ＆ 綜合操作方案
-    # ==========================================
-    if score_5d >= 75:
-        grade_str = "🟢【75~100分：右側強烈轉攻區】外資空單達滿足點回補＋純個股維持率落底＋60分K轉強，可積極換入正2攻擊！"
-    elif score_5d >= 60:
-        grade_str = "🟢【60~74分：外資空單獲利滿足＋維持率落底共振區】指數已殺達外資空單終極獲利滿足點且維持率跌入 139.4% 落底區、60分KDJ金叉，嚴禁殺低正2，抱緊迎接空頭回補強彈！"
-    else:
-        grade_str = "🟡【0~59分：空方宣洩整理・防禦觀望區】等待 60分K 金叉或維持率進一步清洗。"
-
-    extra_2x_shares = max(0, diff_shares_2x)
-    short_1x_shares = max(0, -diff_shares_1x)
-    sell_2x_at_ma60 = int(round(extra_2x_shares * t_ma60 * (1.0 - 0.002425)))
-    buy_1x_at_ma60 = int(round(short_1x_shares * t1x_ma60 * 1.001425))
-    pure_net_at_ma60 = sell_2x_at_ma60 - extra_cash_injected - buy_1x_at_ma60
-
-    st.info(
-        f"### 📋 【五維度 100 分制量化診斷 ➔ 0050 ＆ 0050正2 實戰操作方案】（當前總評分：`{score_5d} / 100 分`）\n\n"
-        f"**🧭 總分位階定性**：**{grade_str}**\n\n"
-        f"  - **維度一【純個股融資維持率 ({s1_maint}/25分)】**：{s1_desc}\n"
-        f"  - **維度二【外資期貨成本與回補滿足度 ({s2_fut}/25分)】**：{s2_desc}\n"
-        f"  - **維度三【選擇權PCR＋權證避險 ({s3_opt_war}/20分)】**：{s3_desc}\n"
-        f"  - **維度四【60分K微觀轉折扳機 ({s4_k60}/15分)】**：{s4_desc}\n"
-        f"  - **維度五【均線空間與負乖離彈力 ({s5_space}/15分)】**：{s5_desc}\n\n"
-        f"**🎯 母子艦隊（目前持有 `{in_lots_2x:.2f}張正2 ＋ {in_lots_1x:.2f}張0050`，真實總損益 `{true_total_pnl:+,}元`）制定操作方案**：\n"
-        f"  1. **【外資殺盤滿足點已到・底部禁砍令】**：經模型推算，外資近月空單平均建倉成本約在 **`{est_short_cost:,.0f} 點`**，今日大盤殺至 `{twii_now:,.1f} 點`（盤中最低 `{fleet['twii_low']:,.0f} 點`），外資每口空單已大賺 **`+{short_profit_pts:,.0f} 點 (+{short_profit_pct:.1f}%)`**，正式抵達 **`{target_cover_2:,.0f} 點` 終極獲利回補滿足區**；同時純個股融資維持率已降至 **`{in_maint_pct:.1f}%`**（進入 `135%~145%` 落底甜美區），且 **60分KDJ (`K={k60_k}/D={k60_d}/J={k60_j}`) 已完成低檔黃金交叉**！手頭 `5.0 張 0050正2` 絕對不可在地板砍倉！\n"
-        f"  2. **【保留最後 0.4張 0050 壓艙底倉】**：您目前有效曝險為 `{effective_leverage}%`，請保留最後 `400 股 0050` 作為核心底倉，靜待外資空單回補帶動軋空強彈。\n"
-        f"  3. **【上檔反彈翻紅與轉回 0050 目標】**：當大盤反彈收復 **翻紅兩平點 `{twii_breakeven:,.0f} 點`（正2約 `{p2x_breakeven:.2f} 元`）** 與 **動態半年線 `{twii_ma120:,.0f} 點`（正2約 `{t_ma120:.2f} 元`）** 時，總資產即全面翻紅轉正！若進一步反彈至 **動態季線 `{twii_ma60:,.0f} 點`（正2約 `{t_ma60:.2f} 元`）**，賣出多增持的 `2 張正2` 不僅能**全額拿回自貼的 `{extra_cash_injected:,} 元` 新資金、買回 `600 股 0050`**，還能額外純賺 **`{pure_net_at_ma60:+,} 元`**！"
-    )
-
-    st.markdown("---")
-
-    # ==========================================
-    # 🔄 表 C：扣除使用者自貼新資金 (6,850元) 後之「真實閉環獲利精算表」
+    # 🔄 第四順位：表 C 與 表 A
     # ==========================================
     st.markdown(f"#### 🔄 表 C：【賣 600股0050 ＋ 自貼 `{extra_cash_injected:,}元` 買 2張正2 ➔ 反彈賣 2張正2 買回 600股0050】真實閉環損益精算表")
 
@@ -1828,7 +1945,6 @@ with tab1:
     st.markdown("---")
 
     net_cash_harvest = int(round(t_harvest * 1000 * (1.0 - 0.002425)))
-    shares_at_ma120 = int(net_cash_harvest // max(1.0, t_ma120))
     shares_at_ma240 = int(net_cash_harvest // max(1.0, t_ma240))
 
     st.markdown("#### 🎯 表 A：【動態浮動均線 ＋ 外資佈空成本與回補滿足區 ＋ 純個股維持率】六階精算表")
