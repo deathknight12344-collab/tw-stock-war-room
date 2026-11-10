@@ -6,7 +6,7 @@ import datetime, pytz, requests, urllib3, io, os, json, time, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股每日戰情室 v50.0", page_icon="🏛️", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股每日戰情室 v50.1", page_icon="🏛️", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -104,56 +104,52 @@ def style_tw_stock_df(df):
     except Exception: return df
 
 # ==========================================
-# 模組 2：EPS 推估與模組 15 產業本益比估值除魅/鑽石尋寶模型
+# 模組 2：EPS 推估與模組 15 產業本益比估值除魅/鑽石尋寶模型 (v50.1 修正無PE假EPS盲點)
 # ==========================================
-def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_official, pb_official=1.5):
+def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_official, support_price=None):
     """
-    利用官方本益比 (PE) 反推近4季實際 EPS，並結合「單月營收YoY」與「累計年營收YoY」推算預估 EPS (Forward EPS)，
-    再依產業歷史常態本益比區間計算【💎EPS合理切入價】與【🎯EPS目標價】，抓出低估鑽石股！
+    1. 僅在具有真實官方本益比 (0.5 < PE < 250) 時，反推近 4 季實際 EPS 並結合單月/累計年營收成長率推算預估 EPS。
+    2. 若官方無 PE (代表近 4 季累計虧損)，嚴禁以現價除以常數捏造假 EPS！改以技術面支撐價定錨，標註為「🔄 轉機觀察(待轉盈)」。
     """
     if curr_p is None or pd.isna(curr_p) or curr_p <= 0:
         return np.nan, np.nan, np.nan, np.nan, "➖ 暫無報價"
 
-    # 1. 決定產業合理本益比區間 (下緣切入 PE_low ~ 常態上緣 PE_high)
     if "金融" in sector_str or code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834"]:
         pe_low, pe_high = 12.0, 15.5
     elif any(k in sector_str for k in ["IC設計", "矽智財", "散熱", "BMC", "ASIC", "高速傳輸", "CoWoS"]) or code in ["2454", "3034", "2379", "3017", "3653", "2059", "5274", "3529", "3661", "3443", "6669", "3324", "5269", "6187", "3131"]:
-        pe_low, pe_high = 19.0, 27.0
+        pe_low, pe_high = 20.0, 28.0
     elif any(k in sector_str for k in ["晶圓", "封測", "CCL", "PCB", "連接器", "鏡頭", "電源"]) or code in ["2330", "3711", "2308", "3533", "2383", "2368", "3008", "2449", "3264", "6274"]:
         pe_low, pe_high = 16.0, 22.0
     else:
-        # AI伺服器組裝、雲端電源(光寶科/廣達/鴻海/緯創/和碩/華碩)與一般電子/轉機股
         pe_low, pe_high = 14.0, 18.5
 
-    # 2. 計算近 4 季 EPS 與結合單月/累計年營收成長率之預估 EPS
     s_yoy = float(single_yoy) if (single_yoy is not None and pd.notna(single_yoy)) else 0.0
     c_yoy = float(cum_yoy) if (cum_yoy is not None and pd.notna(cum_yoy)) else s_yoy
     blended_g = np.clip((0.55 * c_yoy + 0.45 * s_yoy) / 100.0, -0.20, 0.45)
 
-    if pe_official is not None and pd.notna(pe_official) and 0.5 < float(pe_official) < 120.0:
+    # 放寬上限至 250 倍以涵蓋高價 IC 設計/IP 股；若真的無 PE 則不捏造假 EPS
+    if pe_official is not None and pd.notna(pe_official) and 0.5 < float(pe_official) < 250.0:
         pe_val = round(float(pe_official), 1)
         ttm_eps = curr_p / pe_val
-        est_eps = round(max(0.2, ttm_eps * (1.0 + blended_g * 0.60)), 2)
+        est_eps = round(max(0.1, ttm_eps * (1.0 + blended_g * 0.60)), 2)
+        eps_entry_price = round(est_eps * pe_low, 2)
+        eps_target_price = round(est_eps * pe_high, 2)
+
+        if curr_p <= eps_entry_price:
+            disc_pct = round(((eps_entry_price - curr_p) / max(1.0, curr_p)) * 100.0, 1)
+            val_tag = f"💎 低估鑽石 (低於EPS切入價 -{disc_pct}%)"
+        elif curr_p <= eps_target_price:
+            upside_pct = round(((eps_target_price - curr_p) / max(1.0, curr_p)) * 100.0, 1)
+            val_tag = f"✅ 估值合理 (距EPS目標 +{upside_pct}%)"
+        else:
+            over_pct = round(((curr_p - eps_target_price) / max(1.0, eps_target_price)) * 100.0, 1)
+            val_tag = f"⚠️ 超過常態PE (+{over_pct}%・守均線操作)"
+        return est_eps, pe_val, eps_entry_price, eps_target_price, val_tag
     else:
-        # 若為剛轉虧為盈或官方暫無 PE 之轉機股，以營收爆發動能與淨值推估轉機基準 EPS
-        pe_val = np.nan
-        est_eps = round((curr_p / ((pe_low + pe_high) / 2.0)) * (1.0 + max(0.0, blended_g * 0.50)), 2)
-
-    eps_entry_price = round(est_eps * pe_low, 2)
-    eps_target_price = round(est_eps * pe_high, 2)
-
-    # 3. 估值位階定性 (抓出低估鑽石 vs 合理偏多 vs 高估警戒)
-    if curr_p <= eps_entry_price:
-        disc_pct = round(((eps_entry_price - curr_p) / max(1.0, curr_p)) * 100.0, 1)
-        val_tag = f"💎 低估鑽石 (低於EPS切入價 -{disc_pct}%)"
-    elif curr_p <= eps_target_price:
-        upside_pct = round(((eps_target_price - curr_p) / max(1.0, curr_p)) * 100.0, 1)
-        val_tag = f"✅ 估值合理 (距EPS目標 +{upside_pct}%)"
-    else:
-        over_pct = round(((curr_p - eps_target_price) / max(1.0, eps_target_price)) * 100.0, 1)
-        val_tag = f"⚠️ 超過常態PE (+{over_pct}%・守均線操作)"
-
-    return est_eps, pe_val, eps_entry_price, eps_target_price, val_tag
+        # 近 4 季累計虧損或無官方 PE 之轉機股：以技術支撐或折價 3% 作為轉機切入參考價，不標記為低估鑽石
+        tech_entry = round(float(support_price), 2) if (support_price is not None and pd.notna(support_price) and support_price > 0) else round(curr_p * 0.965, 2)
+        tech_target = round(curr_p * 1.12, 2)
+        return np.nan, np.nan, tech_entry, tech_target, "🔄 轉機觀察 (近4季無PE・守支撐操作)"
 
 def parse_mis_price(item, is_index=False):
     def to_f(val):
@@ -233,9 +229,6 @@ def fetch_mis_realtime_batch(code_market_tuples):
     if fx_v8 and fx_v8["close"] > 10.0: rt_dict["USDTWD"] = fx_v8
     return rt_dict
 
-# ==========================================
-# 模組 3：證交所/櫃買 OpenAPI (同時撈取收盤價、單月YoY、累計年YoY、官方本益比PE與殖利率)
-# ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_official_market_data():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -251,7 +244,6 @@ def fetch_official_market_data():
             twii_official = {"close": round(idx_c, 1), "chg_pct": round((idx_chg / prev_idx) * 100, 2) if prev_idx > 0 else 0.0, "date": str(last_row.get("Date", ""))}
     except Exception: pass
 
-    # 1. 上市收盤行情
     try:
         r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10, verify=False)
         if r.status_code == 200:
@@ -274,7 +266,6 @@ def fetch_official_market_data():
                     except Exception: continue
     except Exception: pass
 
-    # 2. 上櫃收盤行情 (雙通道防呆)
     try:
         r_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", headers=headers, timeout=10, verify=False)
         if r_tpex.status_code == 200:
@@ -318,7 +309,6 @@ def fetch_official_market_data():
                             except Exception: continue
         except Exception: pass
 
-    # 3. 撈取上市 (BWIBBU_ALL) 與上櫃 (tpex_mainboard_peratio_analysis) 官方本益比 (PE)、淨值比 (PB)、殖利率
     try:
         r_pe_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", headers=headers, timeout=10, verify=False)
         if r_pe_tw.status_code == 200:
@@ -350,7 +340,6 @@ def fetch_official_market_data():
                     except Exception: pass
     except Exception: pass
 
-    # 4. 集保 400 張大戶比例
     try:
         r_csv = requests.get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", headers=headers, timeout=15, verify=False)
         if r_csv.status_code == 200 and len(r_csv.text) > 500:
@@ -367,7 +356,6 @@ def fetch_official_market_data():
                 tdcc_dict = {str(k): round(float(v), 1) for k, v in grouped_dict.items() if 0.0 < float(v) <= 100.0}
     except Exception: pass
 
-    # 5. 同時擷取「單月營收 YoY」與「累計年營收 YoY」
     for url in ["https://openapi.twse.com.tw/v1/opendata/t187ap05_L", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"]:
         try:
             r_rev = requests.get(url, headers=headers, timeout=12, verify=False)
@@ -693,6 +681,12 @@ def compute_dmi(highs, lows, closes, n=14):
     dmi_bull = (pdi_now > mdi_now) and (adx_now > adx_prev) and ((pdi_prev <= mdi_prev + 4.0) or (pdi_now - mdi_now > pdi_prev - mdi_prev))
     return pdi_now, mdi_now, adx_now, adx_prev, bool(dmi_bull)
 
+def compute_macd(closes):
+    s = pd.Series(closes)
+    dif = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
+    dea = dif.ewm(span=9, adjust=False).mean()
+    return dif.values, dea.values, (dif - dea).values
+
 @st.cache_data(ttl=600, show_spinner=False)
 def download_historical_klines(yf_tickers_tuple):
     try: return yf.download(list(yf_tickers_tuple), period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
@@ -718,21 +712,21 @@ def fetch_and_analyze_fleet(rt_quotes):
     twii_now = twii_official["close"] if twii_official["close"] > 0 else 41661.7
     twii_chg_pct = twii_official["chg_pct"]
     twii_open = twii_high = twii_low = twii_prev_c = twii_now
-    ma5, ma10, ma20, ma60, ma120, ma240 = 41839.0, 43883.0, 45727.0, 46361.0, 45346.0, 38892.0
-    w_ma10, m_ma5 = 46300.0, 44812.0
+    ma5, ma10, ma20, ma60, ma120, ma240 = 42883.0, 44517.0, 46232.0, 46448.0, 45363.0, 38843.0
+    w_ma10, m_ma5 = 46576.0, 44812.0
     ma5_prev, ma10_prev, ma20_prev, ma60_prev, ma120_prev, ma240_prev = ma5, ma10, ma20, ma60, ma120, ma240
     deduct_5d, deduct_10d, deduct_20d, deduct_60d, deduct_120d = ma5, ma10, ma20, ma60, ma120
-    bb_upper, bb_lower = 47327.0, 40500.0
-    k9, d9, j9, j9_prev, kd_cross_d = 20.0, 17.5, 34.2, 12.3, True
-    pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = 14.5, 42.0, 31.0, 30.1, False
+    bb_upper, bb_lower = 47850.0, 40500.0
+    k9, d9, j9, j9_prev, kd_cross_d = 21.2, 17.4, 28.8, 2.3, True
+    pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = 7.5, 52.1, 35.5, 33.5, False
     date_str, quote_src = today_str, "Yahoo Finance / 證交所"
-    est_short_cost, target_cover_1, target_cover_2 = 45896.0, 44060.0, 42454.0
-    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 65.0, 48.0, 100.7, 111.0, True
+    est_short_cost, target_cover_1, target_cover_2 = 46359.0, 44505.0, 42882.0
+    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 79.7, 69.2, 100.7, 111.0, True
     k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = 24.5, 28.0, 30.0, 32.0, False
     k60_ma5, k60_ma20, k60_ma60 = 41889.0, 42500.0, 44200.0
-    fx_now, fx_prev, fx_chg_ntd, fx_ma5, fx_ma20 = 32.788, 32.765, +0.023, 32.807, 32.504
-    p_2x, p_2x_chg = price_dict.get("00631L", {}).get("close", 28.90), price_dict.get("00631L", {}).get("chg_pct", 9.89)
-    p_1x, p_1x_chg = price_dict.get("0050", {}).get("close", 97.45), price_dict.get("0050", {}).get("chg_pct", 5.35)
+    fx_now, fx_prev, fx_chg_ntd, fx_ma5, fx_ma20 = 32.783, 32.788, -0.005, 32.841, 32.545
+    p_2x, p_2x_chg = price_dict.get("00631L", {}).get("close", 30.67), price_dict.get("00631L", {}).get("chg_pct", 6.12)
+    p_1x, p_1x_chg = price_dict.get("0050", {}).get("close", 99.72), price_dict.get("0050", {}).get("chg_pct", 2.33)
 
     try:
         if not data.empty and "^TWII" in data:
@@ -855,19 +849,23 @@ def scan_all_stocks():
     is_market_open = (now_tw.weekday() < 5) and ((now_tw.hour * 60 + now_tw.minute) >= 540)
 
     candidates = dict(CORE_WATCHLIST)
-    short_added, turnaround_added = 0, 0
-    for code, info in price_dict.items():
-        if code not in candidates and len(code) == 4 and info["vol_lots"] >= 1800 and info["chg_pct"] >= 2.2 and info["close"] >= 20.0:
-            candidates[code] = (info["name"], "⚡短線技術破繭", info["market"])
-            short_added += 1
-            if short_added >= 35: break
-    for code, info in price_dict.items():
-        if code not in candidates and len(code) == 4 and (code not in CONSTRUCTION_BLACKLIST) and info["vol_lots"] >= 1000 and info["close"] >= 25.0:
-            yoy_v, tdcc_v = rev_dict.get(code, 0.0), tdcc_dict.get(code, 0.0)
-            if 25.0 <= yoy_v <= 400.0 and tdcc_v >= 45.0:
-                candidates[code] = (info["name"], "🔄傳產轉機題材" if is_traditional_or_construction(code) else "🔄電子轉機成長", info["market"])
-                turnaround_added += 1
-                if turnaround_added >= 25: break
+
+    # 關鍵修復：先將全市場股票依「今日漲幅 chg_pct 由高至低」排序，確保漲停與旱地拔蔥強勢股(含中後段代號與上櫃股)優先納入！
+    sorted_short_pool = sorted(
+        [(c, info) for c, info in price_dict.items() if c not in candidates and len(c) == 4 and (c not in CONSTRUCTION_BLACKLIST) and info["vol_lots"] >= 1200 and info["chg_pct"] >= 3.0 and info["close"] >= 18.0],
+        key=lambda x: x[1]["chg_pct"],
+        reverse=True
+    )
+    for code, info in sorted_short_pool[:55]:
+        candidates[code] = (info["name"], "⚡短線技術破繭", info["market"])
+
+    sorted_turn_pool = sorted(
+        [(c, info) for c, info in price_dict.items() if c not in candidates and len(c) == 4 and (c not in CONSTRUCTION_BLACKLIST) and info["vol_lots"] >= 800 and info["close"] >= 20.0 and 25.0 <= rev_dict.get(c, 0.0) <= 400.0 and tdcc_dict.get(c, 0.0) >= 45.0],
+        key=lambda x: rev_dict.get(x[0], 0.0),
+        reverse=True
+    )
+    for code, info in sorted_turn_pool[:25]:
+        candidates[code] = (info["name"], "🔄傳產轉機題材" if is_traditional_or_construction(code) else "🔄電子轉機成長", info["market"])
 
     mis_targets = [("00631L", "TW"), ("0050", "TW")] + [(c, m) for c, (_, _, m) in candidates.items()]
     rt_quotes = fetch_mis_realtime_batch(tuple(mis_targets))
@@ -884,7 +882,6 @@ def scan_all_stocks():
             last_k_date = df_s.index[-1].strftime("%Y-%m-%d")
             name, sector, _ = candidates[code]
 
-            # 09:00 開盤前跨日保護機制：避免盤前平盤試撮價被當成新K棒塞入而導致今日%歸零
             if code in rt_quotes and rt_quotes[code]["close"] > 0:
                 rt = rt_quotes[code]
                 if last_k_date == today_str:
@@ -903,9 +900,15 @@ def scan_all_stocks():
             vol_ratio = round(est_vol / max(1.0, float(np.mean(v[-6:-1]))), 2)
             if est_vol < 500 and curr_p < 100.0 and (code not in CORE_WATCHLIST): continue
             liq_tag = " ⚠️量縮控盤" if (est_vol < 500 and curr_p >= 100.0) else ""
+
             ma5, ma10, ma20, ma60 = round(float(np.mean(c[-5:])), 2), round(float(np.mean(c[-10:])), 2), round(float(np.mean(c[-20:])), 2), round(float(np.mean(c[-60:])), 2)
             ma240 = round(float(np.mean(c[-240:])), 2) if len(c) >= 240 else ma60
-            bb_up = round(ma20 + 2.0 * float(np.std(c[-20:])), 2)
+            std20 = float(np.std(c[-20:]))
+            bb_up = round(ma20 + 2.0 * std20, 2)
+            bb_bw = round((4.0 * std20 / ma20) * 100, 1) if ma20 > 0 else 99.0
+            prev_ma5, prev_ma10, prev_ma20 = float(np.mean(c[-6:-1])), float(np.mean(c[-11:-1])), float(np.mean(c[-21:-1]))
+            ma_tangle_pct = round((max(prev_ma5, prev_ma10, prev_ma20) - min(prev_ma5, prev_ma10, prev_ma20)) / max(0.1, prev_ma20) * 100, 2)
+
             stk_k9, stk_d9, stk_j9, stk_j_prev, kd_cross_recent = compute_kdj(h[-60:], l[-60:], c[-60:])
             stk_j_up = stk_j9 > stk_j_prev
             pdi, mdi, adx, adx_prev, dmi_bull_active = compute_dmi(h[-90:], l[-90:], c[-90:])
@@ -913,6 +916,8 @@ def scan_all_stocks():
             dmi_str = f"+DI:{pdi} > -DI:{mdi}" if pdi > mdi else f"+DI:{pdi} < -DI:{mdi}"
             adx_str = f"{adx} ({'↑轉強' if adx_up else '↓整理'}{adx_delta:+.1f})"
             kd_dmi_resonance = (stk_k9 >= stk_d9) and (pdi > mdi) and adx_up and (adx >= 18.0) and (kd_cross_recent or dmi_bull_active)
+            _, _, osc = compute_macd(c)
+
             raw_ceiling = max(bb_up, round(float(np.max(h[-21:-1])), 2))
             castle_ceiling = round(curr_p * 1.07, 2) if raw_ceiling <= curr_p else round(raw_ceiling, 2)
             castle_iron = round(min(curr_p, max(ma10, float(l[-1])) if curr_p >= ma10 else min(ma20, float(l[-1]))), 2)
@@ -927,12 +932,10 @@ def scan_all_stocks():
             yoy_str = f"{yoy_val:+.1f}%" if yoy_val is not None else "待公告"
             cum_yoy_str = f"{cum_yoy_val:+.1f}%" if cum_yoy_val is not None else "待公告"
 
-            # 判斷是否為「基本面有基之彈 (單月YoY > 0 且 累計年營收YoY > 0)」或「純技術主力炒作」
             has_solid_fund = (yoy_val is not None and yoy_val > 0.0) and (cum_yoy_val is None or cum_yoy_val > 0.0)
             short_track_tag = "🔥有基之彈(技+基雙渦輪)" if has_solid_fund else "🎭純技術炒作(不看基本面)"
 
-            # 執行 EPS 與本益比估值推算 (找出低估鑽石股)
-            est_eps, pe_disp, eps_entry_p, eps_target_p, val_diag = compute_eps_valuation(code, curr_p, sector, yoy_val, cum_yoy_val, pe_official)
+            est_eps, pe_disp, eps_entry_p, eps_target_p, val_diag = compute_eps_valuation(code, curr_p, sector, yoy_val, cum_yoy_val, pe_official, support_price=castle_iron)
 
             row_base = {
                 "代碼": code, "股名": f"{name}{liq_tag}", "族群": sector, "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d,
@@ -944,14 +947,33 @@ def scan_all_stocks():
                 "單月營收YoY": yoy_str, "累計年營收YoY": cum_yoy_str
             }
             is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
-            if curr_p >= ma20 and (curr_p >= ma60 or ma20 >= ma60 * 0.96) and (not is_heavy_dump):
-                is_overheated = (chg_3d >= 10.5) or (stk_j9 >= 90.0 and not kd_dmi_resonance)
-                if (chg_1d >= 1.5 and vol_ratio >= 1.20 and kd_dmi_resonance and not is_overheated) or (chg_1d >= 2.0 and vol_ratio >= 1.35 and not is_overheated and pdi > mdi and adx >= 16.0):
-                    score = 100 if kd_dmi_resonance else min(99, 85 + int(min(12, vol_ratio * 2.5 + chg_1d)))
-                    list_tab2_launch.append({"實戰優先分": score, "名將戰法診斷": f"👑 KD×DMI雙金叉共振(ADX↑) [{short_track_tag}]" if kd_dmi_resonance else f"🚀 帶量突破頸線 [{short_track_tag}]", **row_base})
-                elif (-3.5 <= chg_1d <= 2.2) and (chg_3d >= -6.5) and (vol_ratio <= 0.90) and (curr_p >= ma20) and (stk_j9 <= 68.0) and (pdi >= mdi * 0.9):
+
+            # 完整恢復「旱地拔蔥」四大實戰型態 (含月線上旱地拔蔥 ＋ 大盤修正後之底部首根帶量突破 5/10/20MA 旱地拔蔥)
+            is_above_ma20_trend = (curr_p >= ma20) and (curr_p >= ma60 or ma20 >= ma60 * 0.94)
+            is_bottom_sprout = (curr_p >= ma5 and curr_p >= ma10) and (prev_p < ma10 or prev_p < ma20) and (chg_1d >= 4.0) and (vol_ratio >= 1.30) and (stk_k9 >= stk_d9 or osc[-1] > osc[-2])
+
+            if (is_above_ma20_trend or is_bottom_sprout) and (not is_heavy_dump):
+                is_overheated = (chg_3d >= 12.5) or (stk_j9 >= 92.0 and not kd_dmi_resonance)
+                if (is_bottom_sprout and not is_overheated) or ((chg_1d >= 1.8 and vol_ratio >= 1.20 and kd_dmi_resonance and not is_overheated) or (chg_1d >= 2.5 and vol_ratio >= 1.30 and not is_overheated and pdi > mdi and adx >= 16.0)):
+                    if kd_dmi_resonance:
+                        score = 100
+                        pattern = f"👑 KD×DMI雙金叉共振旱地拔蔥 [{short_track_tag}]"
+                    elif bb_bw <= 16.0 and curr_p >= ma20:
+                        score = 98
+                        pattern = f"🔥 雙鴻/奇鋐型：布林壓縮旱地拔蔥 [{short_track_tag}]"
+                    elif ma_tangle_pct <= 4.0 and curr_p >= ma20:
+                        score = 97
+                        pattern = f"🌸 瑞昱/矽創型：均線糾結旱地拔蔥 [{short_track_tag}]"
+                    elif is_bottom_sprout:
+                        score = 96
+                        pattern = f"🌱 階段3(3)底部旱地拔蔥：首根長紅帶量穿雙線 [{short_track_tag}]"
+                    else:
+                        score = min(95, 86 + int(min(9, vol_ratio * 2.0 + chg_1d)))
+                        pattern = f"🚀 帶量突破頸線旱地拔蔥 [{short_track_tag}]"
+                    list_tab2_launch.append({"實戰優先分": score, "名將戰法診斷": pattern, **row_base})
+                elif is_above_ma20_trend and (-3.5 <= chg_1d <= 2.2) and (chg_3d >= -6.5) and (vol_ratio <= 0.92) and (stk_j9 <= 68.0) and (pdi >= mdi * 0.9):
                     list_tab2_pullback.append({"蓄勢評分": min(99, 84 + int((1.0 - vol_ratio) * 15) + (3 if pdi > mdi else 0)), "名將戰法診斷": f"⚡ N字量縮守月線 [{short_track_tag}]", **row_base})
-                elif curr_p >= ma5 >= ma10 >= ma20 and chg_1d >= -2.0:
+                elif is_above_ma20_trend and curr_p >= ma5 >= ma10 >= ma20 and chg_1d >= -2.0:
                     pattern = f"🔥 3日急拉過熱 [{short_track_tag}]" if chg_3d >= 10.5 else (f"🚀 KD鈍化惟DMI續強 [{short_track_tag}]" if (stk_j9 >= 90.0 and pdi > mdi and adx_up) else f"🛡️ 沿5/10MA穩步推升 [{short_track_tag}]")
                     list_tab2_orbit.append({"趨勢狀態": pattern, **row_base})
 
