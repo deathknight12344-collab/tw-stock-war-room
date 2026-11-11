@@ -1334,7 +1334,7 @@ def fetch_vix_and_panic_forecast(twii_now, ma5, ma10, ma20, ma60, ma120, ma240, 
     # 動態排序上檔三階段目標與下檔三道支撐，徹底解決月線(45,144)低於半年線(45,387)時造成的區間倒掛！
     if twii_now >= ma10:
         # 當大盤已突破 10MA 時，上檔目標依序為：1.月線與5月線 ➔ 2.半年線 ➔ 3.季線與布林上軌
-        t_ anchors = sorted([ma20, m_ma5, ma120, ma60, bb_upper])
+        t_anchors = sorted([ma20, m_ma5, ma120, ma60, bb_upper])
         up_t1_low, up_t1_high = round(min(ma20, m_ma5), 0), round(max(ma20, m_ma5), 0)
         up_t2_low, up_t2_high = round(min(m_ma5, ma120), 0), round(max(m_ma5, ma120), 0)
         up_t3_low, up_t3_high = round(min(ma60, bb_upper), 0), round(max(ma60, bb_upper), 0)
