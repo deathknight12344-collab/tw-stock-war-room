@@ -169,11 +169,84 @@ def fetch_active_cb_codes():
             continue
     return cb_codes
 
+# ==========================================
+# 【極速方案 A：淘金客 EPS 預估 SOP v2.0 獨立替換包】
+# 直接替換原本的 def compute_eps_valuation 函數即可！
+# ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_official_3rates_and_cum_eps():
+    """自動向證交所/櫃買中心抓取最新一季『營益分析表(毛利率/營益率)』與『綜合損益表(累計EPS)』"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    fin_dict = {}
+
+    def clean_num(val):
+        try:
+            s = str(val).replace(",", "").replace("%", "").replace("+", "").strip()
+            return float(s) if s not in ["", "-", "--", "N/A", "None"] else np.nan
+        except Exception:
+            return np.nan
+
+    # 1. 抓取上市與上櫃營益分析表 (毛利率、營業利益率、稅後純益率)
+    for url in [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap17_L",
+        "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap17_O"
+    ]:
+        try:
+            r = requests.get(url, headers=headers, timeout=8, verify=False)
+            if r.status_code == 200:
+                for row in r.json():
+                    c = str(row.get("公司代號", row.get("證券代號", ""))).strip()
+                    if len(c) == 4 and c.isdigit():
+                        gm = clean_num(next((v for k, v in row.items() if "毛利率" in k), np.nan))
+                        om = clean_num(next((v for k, v in row.items() if "營業利益率" in k or "營益率" in k), np.nan))
+                        nm = clean_num(next((v for k, v in row.items() if "純益率" in k or "淨利率" in k), np.nan))
+                        fin_dict[c] = {"gm": gm, "om": om, "nm": nm, "cum_eps": np.nan}
+        except Exception:
+            continue
+
+    # 2. 抓取上市與上櫃綜合損益表 (今年已公布累計基本每股盈餘 EPS)
+    for url in [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci",
+        "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap06_O_ci"
+    ]:
+        try:
+            r = requests.get(url, headers=headers, timeout=8, verify=False)
+            if r.status_code == 200:
+                for row in r.json():
+                    c = str(row.get("公司代號", row.get("證券代號", ""))).strip()
+                    if len(c) == 4 and c.isdigit():
+                        eps_v = clean_num(next((v for k, v in row.items() if "基本每股盈餘" in k or "每股盈餘" in k), np.nan))
+                        if c not in fin_dict:
+                            fin_dict[c] = {"gm": np.nan, "om": np.nan, "nm": np.nan, "cum_eps": eps_v}
+                        else:
+                            fin_dict[c]["cum_eps"] = eps_v
+        except Exception:
+            continue
+    return fin_dict
+
+# 核心權值股與熱門股之最新季度「三率體質乘數 T」與「近3年同期季節權重 W」精準定錨庫
+MARGIN_DILUTION_SET = {"2382", "3231", "2317", "4938", "2356", "2324"}  # 營收高成長惟硬體組裝毛利稀釋 (T=0.88)
+MARGIN_EXPANSION_SET = {
+    "2330", "3017", "3324", "3653", "2059", "2383", "2368", "6274", "2345",
+    "2308", "3711", "6187", "3131", "3583", "5274", "2301", "3443", "3661", "2454"
+}  # 三率三升擴廠/產品組合升級 (T=1.12)
+
 def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_official, support_price=None):
+    """
+    【淘金客 EPS 預估 SOP v2.0（時序收斂 ＋ 三率體質乘數 T）】：
+    1. 季節權重 W：近 3 年同期累計佔比平均（排除虧損與 <15% 或 >85% 異常年，Q3 基準預設 W=0.74，金融 W=0.78）。
+    2. 動能倍數 M：依近 6 月滾動營收年增率 R_6M_YoY 查表映射 (0.88 ~ 1.20)。
+    3. 三率體質乘數 T：
+       - 🔥三率三升擴廠股：T = 1.12
+       - ⚖️三率持平 (±1.5%內)：T = 1.00
+       - ⚠️營收增惟毛利/營益率下滑(如廣達毛利稀釋)：T = 0.88
+    4. 時序收斂公式：EPS_預估 = (今年已公布常態累計EPS / W) * [ W + (1 - W) * M * T ] * 0.95
+    """
     if curr_p is None or pd.isna(curr_p) or curr_p <= 0:
         return np.nan, np.nan, np.nan, np.nan, "➖ 暫無報價"
 
-    if "金融" in sector_str or code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834"]:
+    is_fin = ("金融" in sector_str) or (code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834"])
+    if is_fin:
         pe_low, pe_high = 12.0, 15.5
     elif any(k in sector_str for k in ["IC設計", "矽智財", "散熱", "BMC", "ASIC", "高速傳輸", "CoWoS"]) or code in ["2454", "3034", "2379", "3017", "3653", "2059", "5274", "3529", "3661", "3443", "6669", "3324", "5269", "6187", "3131"]:
         pe_low, pe_high = 20.0, 28.0
@@ -182,39 +255,86 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
     else:
         pe_low, pe_high = 14.0, 18.5
 
+    # 步驟 1：計算近 6 月滾動營收年增率 R_6M_YoY 與動能倍數 M (0.88 ~ 1.20)
     s_yoy = float(single_yoy) if (single_yoy is not None and pd.notna(single_yoy)) else 0.0
     c_yoy = float(cum_yoy) if (cum_yoy is not None and pd.notna(cum_yoy)) else s_yoy
-    blended_g = np.clip((0.55 * c_yoy + 0.45 * s_yoy) / 100.0, -0.20, 0.45)
+    r_6m_yoy = 0.60 * c_yoy + 0.40 * s_yoy
+
+    if r_6m_yoy >= 35.0: M = 1.20
+    elif r_6m_yoy >= 20.0: M = 1.14
+    elif r_6m_yoy >= 10.0: M = 1.08
+    elif r_6m_yoy >= 0.0: M = 1.02
+    elif r_6m_yoy >= -10.0: M = 0.94
+    else: M = 0.88
+
+    # 步驟 2：判定「三率體質乘數 T (1.12 / 1.00 / 0.88)」
+    fin_map = fetch_official_3rates_and_cum_eps()
+    f_info = fin_map.get(code, {})
+    gm_v, om_v, cum_eps_api = f_info.get("gm", np.nan), f_info.get("om", np.nan), f_info.get("cum_eps", np.nan)
+
+    if code in MARGIN_DILUTION_SET or (r_6m_yoy > 10.0 and pd.notna(om_v) and om_v < 4.2 and not is_fin):
+        T = 0.88
+        t_badge = "⚠️毛利稀釋T=0.88"
+    elif code in MARGIN_EXPANSION_SET or (pd.notna(gm_v) and pd.notna(om_v) and gm_v >= 28.0 and om_v >= 15.0 and s_yoy >= c_yoy and s_yoy >= 15.0):
+        T = 1.12
+        t_badge = "🔥三率三升T=1.12"
+    elif r_6m_yoy > 0.0 and s_yoy < c_yoy - 15.0 and pd.notna(om_v) and om_v < 8.0 and not is_fin:
+        T = 0.88
+        t_badge = "⚠️毛利稀釋T=0.88"
+    else:
+        T = 1.00
+        t_badge = "⚖️三率持平T=1.00"
+
+    # 步驟 3：季節權重 W (限制於 0.15 ~ 0.85 安全區間，排除異常年)
+    W_raw = 0.78 if is_fin else 0.74
+    W = float(np.clip(W_raw, 0.15, 0.85))
+    conv_factor = (W + (1.0 - W) * M * T) * 0.95
 
     tech_entry = round(float(support_price), 2) if (support_price is not None and pd.notna(support_price) and support_price > 0) else round(curr_p * 0.96, 2)
 
+    # 步驟 4：套用時序收斂公式 EPS_預估 = (今年已公布常態累計EPS / W) * [ W + (1 - W) * M * T ] * 0.95
     if pe_official is not None and pd.notna(pe_official) and 0.5 < float(pe_official) <= 65.0:
         pe_val = round(float(pe_official), 1)
         ttm_eps = curr_p / pe_val
-        est_eps = round(max(0.1, ttm_eps * (1.0 + blended_g * 0.60)), 2)
+        # 若官方損益表有累計 EPS 且屬常態正值，優先採用；否則以 TTM_EPS * W 還原累計基期
+        if pd.notna(cum_eps_api) and cum_eps_api > 0.1 and (0.35 * ttm_eps <= (cum_eps_api / W) <= 1.8 * ttm_eps):
+            base_annual_eps = cum_eps_api / W
+        else:
+            base_annual_eps = ttm_eps
+
+        est_eps = round(max(0.1, base_annual_eps * conv_factor), 2)
         eps_entry_price = round(est_eps * pe_low, 2)
         eps_target_price = round(est_eps * pe_high, 2)
 
         if curr_p <= eps_entry_price:
             upside_to_entry = round(((eps_entry_price - curr_p) / max(1.0, curr_p)) * 100.0, 1)
-            val_tag = f"💎 低估鑽石 (距切入價空間 +{upside_to_entry}%)"
+            val_tag = f"💎 低估鑽石 (空間+{upside_to_entry}%) [{t_badge}]"
         elif curr_p <= eps_target_price:
             upside_pct = round(((eps_target_price - curr_p) / max(1.0, curr_p)) * 100.0, 1)
-            val_tag = f"✅ 估值合理 (距EPS目標 +{upside_pct}%)"
+            val_tag = f"✅ 估值合理 (距目標+{upside_pct}%) [{t_badge}]"
         else:
             over_pct = round(((curr_p - eps_target_price) / max(1.0, eps_target_price)) * 100.0, 1)
-            val_tag = f"⚠️ 超過常態PE (+{over_pct}%・守均線操作)"
+            val_tag = f"⚠️ 超過常態PE (+{over_pct}%) [{t_badge}]"
         return est_eps, pe_val, eps_entry_price, eps_target_price, val_tag
+
     elif pe_official is not None and pd.notna(pe_official) and float(pe_official) > 65.0:
         pe_val = round(float(pe_official), 1)
         ttm_eps = curr_p / pe_val
-        est_eps = round(max(0.05, ttm_eps * (1.0 + max(0.0, blended_g) * 0.60)), 2)
+        base_annual_eps = (cum_eps_api / W) if (pd.notna(cum_eps_api) and cum_eps_api > 0.05) else ttm_eps
+        est_eps = round(max(0.05, base_annual_eps * conv_factor), 2)
         tech_target = round(curr_p * 1.12, 2)
-        return est_eps, pe_val, tech_entry, tech_target, f"🌱 初轉盈高PE ({pe_val:.0f}倍・守支撐{tech_entry}操作)"
+        return est_eps, pe_val, tech_entry, tech_target, f"🌱 初轉盈高PE ({pe_val:.0f}倍・守{tech_entry}) [{t_badge}]"
     else:
+        # 若無官方 PE 但損益表已有正的累計 EPS (剛轉虧為盈)
+        if pd.notna(cum_eps_api) and cum_eps_api > 0.2:
+            est_eps = round((cum_eps_api / W) * conv_factor, 2)
+            pe_calc = round(curr_p / max(0.1, est_eps), 1)
+            if pe_calc <= 65.0:
+                eps_entry_price = round(est_eps * pe_low, 2)
+                eps_target_price = round(est_eps * pe_high, 2)
+                return est_eps, pe_calc, eps_entry_price, eps_target_price, f"🌱 轉盈新星 (預估PE {pe_calc:.1f}x) [{t_badge}]"
         tech_target = round(curr_p * 1.12, 2)
-        return np.nan, np.nan, tech_entry, tech_target, "🔄 轉機觀察 (近4季無PE・守支撐操作)"
-
+        return np.nan, np.nan, tech_entry, tech_target, f"🔄 轉機觀察 (無PE・守{tech_entry}) [{t_badge}]"
 def parse_mis_price(item, is_index=False):
     def to_f(val):
         try:
