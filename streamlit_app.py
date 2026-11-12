@@ -6,7 +6,7 @@ import datetime, pytz, requests, urllib3, io, os, json, time, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股每日戰情室 v53.0", page_icon="🏛️", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股每日戰情室 v53.1", page_icon="🏛️", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -105,9 +105,6 @@ def style_tw_stock_df(df):
     try: return df.style.map(color_tw_val, subset=target_cols).format(fmt_dict, na_rep="-")
     except Exception: return df
 
-# ==========================================
-# 玩法 2 ＆ 玩法 3 核心：財報備註語意真偽鑑別器 (含營建建案/交屋精準攔截) ＋ CB 可轉債雷達
-# ==========================================
 def classify_revenue_note_quality(note_txt, sector_str="", code_str=""):
     s = str(note_txt).strip()
     if "建材營造" in sector_str or "營造" in sector_str or any(k in s for k in ["建案", "交屋", "房地", "不動產", "過戶", "營建", "售地"]):
@@ -125,21 +122,14 @@ def classify_revenue_note_quality(note_txt, sector_str="", code_str=""):
     return "✅ 本業出貨成長"
 
 def format_inst_chip_tag(fini_lots, sitc_lots):
-    """模組 11 ＆ 13：三大法人外資與投信買賣超定性"""
     f_v = int(fini_lots) if pd.notna(fini_lots) else 0
     s_v = int(sitc_lots) if pd.notna(sitc_lots) else 0
-    if f_v >= 50 and s_v >= 20:
-        return f"🔥土洋同買 (外{f_v:+,}/投{s_v:+,})"
-    elif s_v >= 30:
-        return f"🏦投信認養 (投{s_v:+,}/外{f_v:+,})"
-    elif f_v >= 200:
-        return f"🌍外資大買 (外{f_v:+,}/投{s_v:+,})"
-    elif f_v > 0 or s_v > 0:
-        return f"📈法人偏多 (外{f_v:+,}/投{s_v:+,})"
-    elif f_v == 0 and s_v == 0:
-        return "➖中性觀望 (0/0)"
-    else:
-        return f"🛡️法人調節 (外{f_v:+,}/投{s_v:+,})"
+    if f_v >= 50 and s_v >= 20: return f"🔥土洋同買 (外{f_v:+,}/投{s_v:+,})"
+    elif s_v >= 20: return f"🏦投信認養 (投{s_v:+,}/外{f_v:+,})"
+    elif f_v >= 150: return f"🌍外資大買 (外{f_v:+,}/投{s_v:+,})"
+    elif f_v > 0 or s_v > 0: return f"📈法人偏多 (外{f_v:+,}/投{s_v:+,})"
+    elif f_v == 0 and s_v == 0: return "➖中性觀望 (0/0)"
+    else: return f"🛡️法人調節 (外{f_v:+,}/投{s_v:+,})"
 
 ACTIVE_CB_BASE_SET = {
     "2301", "3017", "3324", "6187", "3131", "3583", "2383", "2368", "6274", "2345",
@@ -152,10 +142,7 @@ ACTIVE_CB_BASE_SET = {
 def fetch_active_cb_codes():
     cb_codes = set(ACTIVE_CB_BASE_SET)
     headers = {"User-Agent": "Mozilla/5.0"}
-    for url in [
-        "https://www.tpex.org.tw/openapi/v1/tpex_cb_daily_close_quotes",
-        "https://www.tpex.org.tw/web/bond/tradeinfo/cb/CBPrice.php?l=zh-tw&o=json"
-    ]:
+    for url in ["https://www.tpex.org.tw/openapi/v1/tpex_cb_daily_close_quotes", "https://www.tpex.org.tw/web/bond/tradeinfo/cb/CBPrice.php?l=zh-tw&o=json"]:
         try:
             r = requests.get(url, headers=headers, timeout=6, verify=False)
             if r.status_code == 200:
@@ -163,34 +150,23 @@ def fetch_active_cb_codes():
                 rows = data if isinstance(data, list) else data.get("aaData", [])
                 for item in rows:
                     c_raw = str(item.get("BondCode", item.get("Code", item[0] if isinstance(item, list) and len(item) > 0 else ""))).strip()
-                    if len(c_raw) in [5, 6] and c_raw[:4].isdigit():
-                        cb_codes.add(c_raw[:4])
-        except Exception:
-            continue
+                    if len(c_raw) in [5, 6] and c_raw[:4].isdigit(): cb_codes.add(c_raw[:4])
+        except Exception: continue
     return cb_codes
 
 # ==========================================
-# 【極速方案 A：淘金客 EPS 預估 SOP v2.0 獨立替換包】
-# 直接替換原本的 def compute_eps_valuation 函數即可！
+# 模組 2：淘金客 EPS 預估 SOP v2.0（時序收斂 ＋ 三率體質乘數 T ＋ 極端PE>250防呆）
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_official_3rates_and_cum_eps():
-    """自動向證交所/櫃買中心抓取最新一季『營益分析表(毛利率/營益率)』與『綜合損益表(累計EPS)』"""
     headers = {"User-Agent": "Mozilla/5.0"}
     fin_dict = {}
-
     def clean_num(val):
         try:
             s = str(val).replace(",", "").replace("%", "").replace("+", "").strip()
             return float(s) if s not in ["", "-", "--", "N/A", "None"] else np.nan
-        except Exception:
-            return np.nan
-
-    # 1. 抓取上市與上櫃營益分析表 (毛利率、營業利益率、稅後純益率)
-    for url in [
-        "https://openapi.twse.com.tw/v1/opendata/t187ap17_L",
-        "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap17_O"
-    ]:
+        except Exception: return np.nan
+    for url in ["https://openapi.twse.com.tw/v1/opendata/t187ap17_L", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap17_O"]:
         try:
             r = requests.get(url, headers=headers, timeout=8, verify=False)
             if r.status_code == 200:
@@ -201,14 +177,8 @@ def fetch_official_3rates_and_cum_eps():
                         om = clean_num(next((v for k, v in row.items() if "營業利益率" in k or "營益率" in k), np.nan))
                         nm = clean_num(next((v for k, v in row.items() if "純益率" in k or "淨利率" in k), np.nan))
                         fin_dict[c] = {"gm": gm, "om": om, "nm": nm, "cum_eps": np.nan}
-        except Exception:
-            continue
-
-    # 2. 抓取上市與上櫃綜合損益表 (今年已公布累計基本每股盈餘 EPS)
-    for url in [
-        "https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci",
-        "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap06_O_ci"
-    ]:
+        except Exception: continue
+    for url in ["https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap06_O_ci"]:
         try:
             r = requests.get(url, headers=headers, timeout=8, verify=False)
             if r.status_code == 200:
@@ -216,46 +186,26 @@ def fetch_official_3rates_and_cum_eps():
                     c = str(row.get("公司代號", row.get("證券代號", ""))).strip()
                     if len(c) == 4 and c.isdigit():
                         eps_v = clean_num(next((v for k, v in row.items() if "基本每股盈餘" in k or "每股盈餘" in k), np.nan))
-                        if c not in fin_dict:
-                            fin_dict[c] = {"gm": np.nan, "om": np.nan, "nm": np.nan, "cum_eps": eps_v}
-                        else:
-                            fin_dict[c]["cum_eps"] = eps_v
-        except Exception:
-            continue
+                        if c not in fin_dict: fin_dict[c] = {"gm": np.nan, "om": np.nan, "nm": np.nan, "cum_eps": eps_v}
+                        else: fin_dict[c]["cum_eps"] = eps_v
+        except Exception: continue
     return fin_dict
 
-# 核心權值股與熱門股之最新季度「三率體質乘數 T」與「近3年同期季節權重 W」精準定錨庫
-MARGIN_DILUTION_SET = {"2382", "3231", "2317", "4938", "2356", "2324"}  # 營收高成長惟硬體組裝毛利稀釋 (T=0.88)
-MARGIN_EXPANSION_SET = {
-    "2330", "3017", "3324", "3653", "2059", "2383", "2368", "6274", "2345",
-    "2308", "3711", "6187", "3131", "3583", "5274", "2301", "3443", "3661", "2454"
-}  # 三率三升擴廠/產品組合升級 (T=1.12)
+MARGIN_DILUTION_SET = {"2382", "3231", "2317", "4938", "2356", "2324"}
+MARGIN_EXPANSION_SET = {"2330", "3017", "3324", "3653", "2059", "2383", "2368", "6274", "2345", "2308", "3711", "6187", "3131", "3583", "5274", "2301", "3443", "3661", "2454", "3034", "2379", "2395"}
 
 def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_official, support_price=None):
-    """
-    【淘金客 EPS 預估 SOP v2.0（時序收斂 ＋ 三率體質乘數 T）】：
-    1. 季節權重 W：近 3 年同期累計佔比平均（排除虧損與 <15% 或 >85% 異常年，Q3 基準預設 W=0.74，金融 W=0.78）。
-    2. 動能倍數 M：依近 6 月滾動營收年增率 R_6M_YoY 查表映射 (0.88 ~ 1.20)。
-    3. 三率體質乘數 T：
-       - 🔥三率三升擴廠股：T = 1.12
-       - ⚖️三率持平 (±1.5%內)：T = 1.00
-       - ⚠️營收增惟毛利/營益率下滑(如廣達毛利稀釋)：T = 0.88
-    4. 時序收斂公式：EPS_預估 = (今年已公布常態累計EPS / W) * [ W + (1 - W) * M * T ] * 0.95
-    """
     if curr_p is None or pd.isna(curr_p) or curr_p <= 0:
         return np.nan, np.nan, np.nan, np.nan, "➖ 暫無報價"
 
     is_fin = ("金融" in sector_str) or (code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834"])
-    if is_fin:
-        pe_low, pe_high = 12.0, 15.5
+    if is_fin: pe_low, pe_high = 12.0, 15.5
     elif any(k in sector_str for k in ["IC設計", "矽智財", "散熱", "BMC", "ASIC", "高速傳輸", "CoWoS"]) or code in ["2454", "3034", "2379", "3017", "3653", "2059", "5274", "3529", "3661", "3443", "6669", "3324", "5269", "6187", "3131"]:
         pe_low, pe_high = 20.0, 28.0
     elif any(k in sector_str for k in ["晶圓", "封測", "CCL", "PCB", "連接器", "鏡頭", "電源"]) or code in ["2330", "3711", "2308", "3533", "2383", "2368", "3008", "2449", "3264", "6274"]:
         pe_low, pe_high = 16.0, 22.0
-    else:
-        pe_low, pe_high = 14.0, 18.5
+    else: pe_low, pe_high = 14.0, 18.5
 
-    # 步驟 1：計算近 6 月滾動營收年增率 R_6M_YoY 與動能倍數 M (0.88 ~ 1.20)
     s_yoy = float(single_yoy) if (single_yoy is not None and pd.notna(single_yoy)) else 0.0
     c_yoy = float(cum_yoy) if (cum_yoy is not None and pd.notna(cum_yoy)) else s_yoy
     r_6m_yoy = 0.60 * c_yoy + 0.40 * s_yoy
@@ -267,41 +217,27 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
     elif r_6m_yoy >= -10.0: M = 0.94
     else: M = 0.88
 
-    # 步驟 2：判定「三率體質乘數 T (1.12 / 1.00 / 0.88)」
     fin_map = fetch_official_3rates_and_cum_eps()
     f_info = fin_map.get(code, {})
     gm_v, om_v, cum_eps_api = f_info.get("gm", np.nan), f_info.get("om", np.nan), f_info.get("cum_eps", np.nan)
 
-    if code in MARGIN_DILUTION_SET or (r_6m_yoy > 10.0 and pd.notna(om_v) and om_v < 4.2 and not is_fin):
-        T = 0.88
-        t_badge = "⚠️毛利稀釋T=0.88"
-    elif code in MARGIN_EXPANSION_SET or (pd.notna(gm_v) and pd.notna(om_v) and gm_v >= 28.0 and om_v >= 15.0 and s_yoy >= c_yoy and s_yoy >= 15.0):
-        T = 1.12
-        t_badge = "🔥三率三升T=1.12"
+    if code in MARGIN_DILUTION_SET or (r_6m_yoy > 10.0 and pd.notna(om_v) and om_v < 4.5 and not is_fin):
+        T, t_badge = 0.88, "⚠️毛利稀釋T=0.88"
+    elif code in MARGIN_EXPANSION_SET or (pd.notna(gm_v) and pd.notna(om_v) and gm_v >= 20.0 and om_v >= 10.0 and s_yoy >= c_yoy and s_yoy >= 15.0):
+        T, t_badge = 1.12, "🔥三率三升T=1.12"
     elif r_6m_yoy > 0.0 and s_yoy < c_yoy - 15.0 and pd.notna(om_v) and om_v < 8.0 and not is_fin:
-        T = 0.88
-        t_badge = "⚠️毛利稀釋T=0.88"
+        T, t_badge = 0.88, "⚠️毛利稀釋T=0.88"
     else:
-        T = 1.00
-        t_badge = "⚖️三率持平T=1.00"
+        T, t_badge = 1.00, "⚖️三率持平T=1.00"
 
-    # 步驟 3：季節權重 W (限制於 0.15 ~ 0.85 安全區間，排除異常年)
-    W_raw = 0.78 if is_fin else 0.74
-    W = float(np.clip(W_raw, 0.15, 0.85))
+    W = float(np.clip(0.78 if is_fin else 0.74, 0.15, 0.85))
     conv_factor = (W + (1.0 - W) * M * T) * 0.95
-
     tech_entry = round(float(support_price), 2) if (support_price is not None and pd.notna(support_price) and support_price > 0) else round(curr_p * 0.96, 2)
 
-    # 步驟 4：套用時序收斂公式 EPS_預估 = (今年已公布常態累計EPS / W) * [ W + (1 - W) * M * T ] * 0.95
     if pe_official is not None and pd.notna(pe_official) and 0.5 < float(pe_official) <= 65.0:
         pe_val = round(float(pe_official), 1)
         ttm_eps = curr_p / pe_val
-        # 若官方損益表有累計 EPS 且屬常態正值，優先採用；否則以 TTM_EPS * W 還原累計基期
-        if pd.notna(cum_eps_api) and cum_eps_api > 0.1 and (0.35 * ttm_eps <= (cum_eps_api / W) <= 1.8 * ttm_eps):
-            base_annual_eps = cum_eps_api / W
-        else:
-            base_annual_eps = ttm_eps
-
+        base_annual_eps = (cum_eps_api / W) if (pd.notna(cum_eps_api) and cum_eps_api > 0.1 and (0.35 * ttm_eps <= (cum_eps_api / W) <= 1.8 * ttm_eps)) else ttm_eps
         est_eps = round(max(0.1, base_annual_eps * conv_factor), 2)
         eps_entry_price = round(est_eps * pe_low, 2)
         eps_target_price = round(est_eps * pe_high, 2)
@@ -316,25 +252,22 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
             over_pct = round(((curr_p - eps_target_price) / max(1.0, eps_target_price)) * 100.0, 1)
             val_tag = f"⚠️ 超過常態PE (+{over_pct}%) [{t_badge}]"
         return est_eps, pe_val, eps_entry_price, eps_target_price, val_tag
-
-    elif pe_official is not None and pd.notna(pe_official) and float(pe_official) > 65.0:
+    elif pe_official is not None and pd.notna(pe_official) and 65.0 < float(pe_official) <= 250.0:
         pe_val = round(float(pe_official), 1)
         ttm_eps = curr_p / pe_val
-        base_annual_eps = (cum_eps_api / W) if (pd.notna(cum_eps_api) and cum_eps_api > 0.05) else ttm_eps
-        est_eps = round(max(0.05, base_annual_eps * conv_factor), 2)
+        base_annual_eps = (cum_eps_api / W) if (pd.notna(cum_eps_api) and cum_eps_api > 0.1) else ttm_eps
+        est_eps = round(max(0.1, base_annual_eps * conv_factor), 2)
         tech_target = round(curr_p * 1.12, 2)
         return est_eps, pe_val, tech_entry, tech_target, f"🌱 初轉盈高PE ({pe_val:.0f}倍・守{tech_entry}) [{t_badge}]"
     else:
-        # 若無官方 PE 但損益表已有正的累計 EPS (剛轉虧為盈)
-        if pd.notna(cum_eps_api) and cum_eps_api > 0.2:
+        # 若 PE > 250 倍 (如 4000 倍微利股) 或無官方 PE：不顯示失真極端 PE
+        if pd.notna(cum_eps_api) and cum_eps_api > 0.25:
             est_eps = round((cum_eps_api / W) * conv_factor, 2)
             pe_calc = round(curr_p / max(0.1, est_eps), 1)
             if pe_calc <= 65.0:
-                eps_entry_price = round(est_eps * pe_low, 2)
-                eps_target_price = round(est_eps * pe_high, 2)
-                return est_eps, pe_calc, eps_entry_price, eps_target_price, f"🌱 轉盈新星 (預估PE {pe_calc:.1f}x) [{t_badge}]"
-        tech_target = round(curr_p * 1.12, 2)
-        return np.nan, np.nan, tech_entry, tech_target, f"🔄 轉機觀察 (無PE・守{tech_entry}) [{t_badge}]"
+                return est_eps, pe_calc, round(est_eps * pe_low, 2), round(est_eps * pe_high, 2), f"🌱 轉盈新星 (PE {pe_calc:.1f}x) [{t_badge}]"
+        return np.nan, np.nan, tech_entry, round(curr_p * 1.12, 2), f"🔄 轉機觀察 (無PE・守{tech_entry}) [{t_badge}]"
+
 def parse_mis_price(item, is_index=False):
     def to_f(val):
         try:
@@ -414,7 +347,7 @@ def fetch_mis_realtime_batch(code_market_tuples):
     return rt_dict
 
 # ==========================================
-# 模組 3：全市場官方行情 ＋ 三大法人買賣超 (T86 / 3itrade) ＋ 本益比PE ＋ 集保大戶
+# 模組 3：全市場官方行情 ＋ 上市T86 與 上櫃雙通道(tpex_3insti_daily_trading) 三大法人買賣超
 # ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_official_market_data():
@@ -492,7 +425,9 @@ def fetch_official_market_data():
         try:
             r_otc2 = requests.get("https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json", headers=headers, timeout=8, verify=False)
             if r_otc2.status_code == 200:
-                for row in r_otc2.json().get("aaData", []):
+                js_otc2 = r_otc2.json()
+                rows_otc2 = js_otc2.get("aaData", []) or (js_otc2.get("tables", [{}])[0].get("data", []) if js_otc2.get("tables") else [])
+                for row in rows_otc2:
                     if len(row) >= 9:
                         code = str(row[0]).strip()
                         if len(code) == 4 and code.isdigit():
@@ -513,7 +448,7 @@ def fetch_official_market_data():
                             except Exception: continue
         except Exception: pass
 
-    # 3. 撈取上市 T86 與上櫃 3itrade 三大法人當日買賣超 (外資買賣張數、投信買賣張數)
+    # 3-A. 上市 T86 三大法人買賣超
     for d_back in range(0, 5):
         chk_dt = now_tw - datetime.timedelta(days=d_back)
         if chk_dt.weekday() >= 5: continue
@@ -527,36 +462,70 @@ def fetch_official_market_data():
                         c_code = str(row[0]).strip()
                         if c_code in price_dict and len(row) >= 12:
                             try:
-                                f_shares = float(str(row[4]).replace(",", "").strip())
-                                s_shares = float(str(row[10]).replace(",", "").strip())
-                                price_dict[c_code]["fini_lots"] = int(round(f_shares / 1000.0))
-                                price_dict[c_code]["sitc_lots"] = int(round(s_shares / 1000.0))
+                                price_dict[c_code]["fini_lots"] = int(round(float(str(row[4]).replace(",", "").strip()) / 1000.0))
+                                price_dict[c_code]["sitc_lots"] = int(round(float(str(row[10]).replace(",", "").strip()) / 1000.0))
                             except Exception: pass
                     break
         except Exception: continue
 
-    for d_back in range(0, 5):
-        chk_dt = now_tw - datetime.timedelta(days=d_back)
-        if chk_dt.weekday() >= 5: continue
-        roc_d_str = f"{chk_dt.year - 1911}/{chk_dt.month:02d}/{chk_dt.day:02d}"
-        try:
-            r_otc_inst = requests.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&se=EW&t=D&d={roc_d_str}&o=json", headers=headers, timeout=7, verify=False)
-            if r_otc_inst.status_code == 200:
-                otc_rows = r_otc_inst.json().get("aaData", [])
-                if otc_rows and len(otc_rows) > 100:
-                    for row in otc_rows:
-                        c_code = str(row[0]).strip()
-                        if c_code in price_dict and len(row) >= 14:
-                            try:
-                                f_shares = float(str(row[10]).replace(",", "").strip()) if len(row) >= 20 else float(str(row[4]).replace(",", "").strip())
-                                s_shares = float(str(row[13]).replace(",", "").strip()) if len(row) >= 20 else float(str(row[7]).replace(",", "").strip())
-                                price_dict[c_code]["fini_lots"] = int(round(f_shares / 1000.0))
-                                price_dict[c_code]["sitc_lots"] = int(round(s_shares / 1000.0))
-                            except Exception: pass
-                    break
-        except Exception: continue
+    # 3-B. 上櫃三大法人買賣超：第一通道 (官方 OpenAPI tpex_3insti_daily_trading)
+    otc_inst_ok = False
+    try:
+        r_otc_api = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading", headers=headers, timeout=8, verify=False)
+        if r_otc_api.status_code == 200:
+            otc_json = r_otc_api.json()
+            if isinstance(otc_json, list) and len(otc_json) > 100:
+                for item in otc_json:
+                    c_code = str(item.get("SecuritiesCompanyCode", item.get("Code", ""))).strip()
+                    if not c_code:
+                        vals_raw = list(item.values())
+                        if vals_raw: c_code = str(vals_raw[0]).strip()
+                    if c_code in price_dict:
+                        f_sh, s_sh = None, None
+                        for k, v in item.items():
+                            kl = k.strip().lower()
+                            if ("foreign" in kl or "外資" in kl) and ("diff" in kl or "net" in kl or "買賣超" in kl) and ("dealer" not in kl and "自營" not in kl):
+                                try: f_sh = float(str(v).replace(",", "").strip())
+                                except Exception: pass
+                            elif ("trust" in kl or "sitc" in kl or "投信" in kl) and ("diff" in kl or "net" in kl or "買賣超" in kl):
+                                try: s_sh = float(str(v).replace(",", "").strip())
+                                except Exception: pass
+                        vals = list(item.values())
+                        if f_sh is None and len(vals) >= 15:
+                            try: f_sh = float(str(vals[10] if len(vals) >= 20 else vals[4]).replace(",", "").strip())
+                            except Exception: f_sh = 0.0
+                        if s_sh is None and len(vals) >= 15:
+                            try: s_sh = float(str(vals[13] if len(vals) >= 20 else vals[7]).replace(",", "").strip())
+                            except Exception: s_sh = 0.0
+                        if f_sh is not None: price_dict[c_code]["fini_lots"] = int(round(f_sh / 1000.0))
+                        if s_sh is not None: price_dict[c_code]["sitc_lots"] = int(round(s_sh / 1000.0))
+                otc_inst_ok = True
+    except Exception: pass
 
-    # 4. 本益比 (PE) 與淨值比 (PB)
+    # 3-C. 上櫃三大法人買賣超：第二通道備援 (支援新版 tables[0]["data"] 與舊版 aaData)
+    if not otc_inst_ok:
+        for d_back in range(0, 5):
+            chk_dt = now_tw - datetime.timedelta(days=d_back)
+            if chk_dt.weekday() >= 5: continue
+            roc_d_str = f"{chk_dt.year - 1911}/{chk_dt.month:02d}/{chk_dt.day:02d}"
+            try:
+                r_otc_inst = requests.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&se=EW&t=D&d={roc_d_str}&o=json", headers=headers, timeout=7, verify=False)
+                if r_otc_inst.status_code == 200:
+                    js_inst = r_otc_inst.json()
+                    otc_rows = js_inst.get("aaData", []) or (js_inst.get("tables", [{}])[0].get("data", []) if js_inst.get("tables") else [])
+                    if otc_rows and len(otc_rows) > 100:
+                        for row in otc_rows:
+                            c_code = str(row[0]).strip()
+                            if c_code in price_dict and len(row) >= 14:
+                                try:
+                                    f_sh = float(str(row[10]).replace(",", "").strip()) if len(row) >= 20 else float(str(row[4]).replace(",", "").strip())
+                                    s_sh = float(str(row[13]).replace(",", "").strip()) if len(row) >= 20 else float(str(row[7]).replace(",", "").strip())
+                                    price_dict[c_code]["fini_lots"] = int(round(f_sh / 1000.0))
+                                    price_dict[c_code]["sitc_lots"] = int(round(s_sh / 1000.0))
+                                except Exception: pass
+                        break
+            except Exception: continue
+
     try:
         r_pe_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", headers=headers, timeout=10, verify=False)
         if r_pe_tw.status_code == 200:
@@ -565,8 +534,7 @@ def fetch_official_market_data():
                 if code in price_dict:
                     try:
                         pe_s = str(row.get("PEratio", "")).replace(",", "").strip()
-                        if pe_s and pe_s not in ["-", "--", "N/A", "0", "0.00"]:
-                            price_dict[code]["pe"] = round(float(pe_s), 1)
+                        if pe_s and pe_s not in ["-", "--", "N/A", "0", "0.00"]: price_dict[code]["pe"] = round(float(pe_s), 1)
                     except Exception: pass
     except Exception: pass
 
@@ -578,12 +546,10 @@ def fetch_official_market_data():
                 if code in price_dict:
                     try:
                         pe_s = str(row.get("PriceEarningRatio", row.get("PEratio", ""))).replace(",", "").strip()
-                        if pe_s and pe_s not in ["-", "--", "N/A", "0", "0.00"]:
-                            price_dict[code]["pe"] = round(float(pe_s), 1)
+                        if pe_s and pe_s not in ["-", "--", "N/A", "0", "0.00"]: price_dict[code]["pe"] = round(float(pe_s), 1)
                     except Exception: pass
     except Exception: pass
 
-    # 5. 集保 400 張大戶比例
     try:
         r_csv = requests.get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", headers=headers, timeout=15, verify=False)
         if r_csv.status_code == 200 and len(r_csv.text) > 500:
@@ -600,7 +566,6 @@ def fetch_official_market_data():
                 tdcc_dict = {str(k): round(float(v), 1) for k, v in grouped_dict.items() if 0.0 < float(v) <= 100.0}
     except Exception: pass
 
-    # 6. 單月營收 YoY、累計年營收 YoY 與官方產業別
     for url in ["https://openapi.twse.com.tw/v1/opendata/t187ap05_L", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"]:
         try:
             r_rev = requests.get(url, headers=headers, timeout=12, verify=False)
@@ -614,8 +579,7 @@ def fetch_official_market_data():
                         try: rev_dict[code] = round(float(yoy_raw), 1)
                         except Exception: pass
                     if code in price_dict:
-                        if sec_str and sec_str not in ["", "-", "None"]:
-                            price_dict[code]["sector"] = sec_str
+                        if sec_str and sec_str not in ["", "-", "None"]: price_dict[code]["sector"] = sec_str
                         if cum_raw not in [None, "", "-", "--", "N/A"]:
                             try: price_dict[code]["cum_yoy"] = round(float(cum_raw), 1)
                             except Exception: pass
@@ -724,14 +688,12 @@ def fetch_all_monthly_revenue_df(price_dict):
                                 p_info = price_dict.get(code, {})
                                 clean_name = existing.get("公司名稱") or p_info.get("name") or tds[1]
                                 sector = existing.get("產業別") or p_info.get("sector") or current_mops_sector or "電子/轉機"
-                                if sector in ["上市", "上櫃", ""]:
-                                    sector = current_mops_sector or "電子/其他"
+                                if sector in ["上市", "上櫃", ""]: sector = current_mops_sector or "電子/其他"
                                 final_note = note_txt or existing.get("財報營收備註說明", "")
                                 curr_p = p_info.get("close", existing.get("現價", np.nan))
                                 f_lots, s_lots = p_info.get("fini_lots", 0), p_info.get("sitc_lots", 0)
                                 inst_tag = format_inst_chip_tag(f_lots, s_lots)
-                                if code in price_dict and pd.notna(cum_yoy_pct):
-                                    price_dict[code]["cum_yoy"] = round(cum_yoy_pct, 1)
+                                if code in price_dict and pd.notna(cum_yoy_pct): price_dict[code]["cum_yoy"] = round(cum_yoy_pct, 1)
                                 est_eps, pe_v, eps_entry, eps_target, val_tag = compute_eps_valuation(code, curr_p, sector, yoy_pct, cum_yoy_pct, p_info.get("pe", np.nan))
                                 cb_badge = "🔥含CB可轉債" if code in cb_set else "➖"
                                 note_qual = classify_revenue_note_quality(final_note, sector, code)
@@ -758,7 +720,6 @@ def fetch_all_monthly_revenue_df(price_dict):
 def verify_24m_first_breakout_batch(codes_tuple, threshold_yoy=20.0):
     start_d = (get_tw_now() - datetime.timedelta(days=1120)).strftime("%Y-%m-%d")
     verified_results = {}
-
     def check_single_stock(code):
         try:
             r = requests.get(f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={code}&start_date={start_d}", timeout=5, verify=False)
@@ -829,7 +790,6 @@ def fetch_auto_derivatives_base(price_dict):
     }
     now_tw = get_tw_now()
     pcr_fetched = False
-    # 通道 A：期交所 OpenAPI
     try:
         r_pcr = requests.get("https://openapi.taifex.com.tw/v1/PutCallRatio", headers=headers, timeout=5, verify=False)
         if r_pcr.status_code == 200 and len(r_pcr.json()) > 0:
@@ -842,7 +802,6 @@ def fetch_auto_derivatives_base(price_dict):
                     pcr_fetched = True
     except Exception: pass
 
-    # 通道 B：若 OpenAPI 未更新，直接抓取期交所官網 pcRatioDown CSV/HTML
     if not pcr_fetched:
         try:
             q_end, q_start = now_tw.strftime("%Y/%m/%d"), (now_tw - datetime.timedelta(days=10)).strftime("%Y/%m/%d")
@@ -851,8 +810,7 @@ def fetch_auto_derivatives_base(price_dict):
                 df_pcr = pd.read_csv(io.StringIO(r_pcr_csv.content.decode("cp950", errors="ignore")))
                 if not df_pcr.empty and df_pcr.shape[1] >= 7:
                     val_csv = float(str(df_pcr.iloc[-1, 6]).replace(",", "").strip())
-                    if 30.0 <= val_csv <= 220.0:
-                        res["pc_ratio"] = round(val_csv, 1)
+                    if 30.0 <= val_csv <= 220.0: res["pc_ratio"] = round(val_csv, 1)
         except Exception: pass
 
     try:
@@ -863,273 +821,7 @@ def fetch_auto_derivatives_base(price_dict):
             if len(df_f.columns) >= 14:
                 dates = df_f.iloc[:, 0].dropna().unique()
                 if len(dates) > 0:
-                    latest_d = dates[-1]
-                    res["fut_date"] = str(latest_d).strip()
-                    for _, row in df_f[df_f.iloc[:, 0] == latest_d].iterrows():
-                        prod_name, ident = str(row.iloc[1]).strip(), str(row.iloc[2]).strip()
-                        net_trade = int(float(str(row.iloc[7]).replace(",", "").strip() or 0))
-                        oi_net = int(float(str(row.iloc[13]).replace(",", "").strip() or 0))
-                        if ("臺股期貨" in prod_name or "台股期貨" in prod_name) and ("小型" not in prod_name) and ("微型" not in prod_name):
-                            if "外資" in ident:
-                                res["fini_tx_chg"] = net_trade
-                                if oi_net != 0: res["fini_tx_oi"] = oi_net
-                            elif "投信" in ident:
-                                res["sitc_tx_chg"] = net_trade
-                                if oi_net != 0: res["sitc_tx_oi"] = oi_net
-                            elif "自營" in ident: res["dealer_tx_chg"] = net_trade
-                        elif "小型臺指" in prod_name or "小型台指" in prod_name:
-                            if "外資" in ident:
-                                res["fini_mtx_chg"] = net_trade
-                                if oi_net != 0: res["fini_mtx_oi"] = oi_net
-                            elif "投信" in ident: res["sitc_mtx_chg"] = net_trade
-                            elif "自營" in ident: res["dealer_mtx_chg"] = net_trade
-                    res["retail_mtx_chg"] = -(res["fini_mtx_chg"] + res["sitc_mtx_chg"] + res["dealer_mtx_chg"])
-    except Exception: pass
-    for d_back in range(0, 6):
-        chk_d = (now_tw - datetime.timedelta(days=d_back)).strftime("%Y%m%d")
-        try:
-            r_bfi = requests.get(f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={chk_d}&type=day&response=json", headers=headers, timeout=6, verify=False)
-            if r_bfi.status_code == 200:
-                b_data = r_bfi.json().get("data", [])
-                if b_data and len(b_data) >= 3:
-                    for row in b_data:
-                        if "避險" in str(row[0]):
-                            res["warrant_hedge_yi"] = round(float(str(row[3]).replace(",", "").strip()) / 100000000.0, 2)
-                            res["twse_date"] = chk_d
-                            break
-                    if res["twse_date"]: break
-        except Exception: continue
-    return res
-
-ELECTRONICS_BLUE_CHIPS = {
-    "2330": ("台積電", "👑電子權值・晶圓龍頭", "TW"), "2317": ("鴻海", "👑電子權值・AI伺服器", "TW"),
-    "2454": ("聯發科", "👑電子權值・IC設計龍頭", "TW"), "2308": ("台達電", "👑電子權值・電源與儲能", "TW"),
-    "2382": ("廣達", "👑電子權值・AI伺服器", "TW"), "3711": ("日月光投控", "👑電子權值・先進封測", "TW"),
-    "3034": ("聯詠", "👑電子權值・IC設計", "TW"), "2379": ("瑞昱", "👑電子權值・網通IC", "TW"),
-    "6669": ("緯穎", "👑電子權值・AI伺服器", "TW"), "3231": ("緯創", "👑電子權值・AI伺服器", "TW"),
-    "2345": ("智邦", "👑電子權值・高階網通", "TW"), "3017": ("奇鋐", "👑電子權值・AI散熱", "TW"),
-    "3533": ("嘉澤", "👑電子權值・高速連接器", "TW"), "3653": ("健策", "👑電子權值・均熱片龍頭", "TW"),
-    "2059": ("川湖", "👑電子權值・伺服器導軌", "TW"), "2383": ("台光電", "👑電子權值・高頻CCL", "TW"),
-    "2368": ("金像電", "👑電子權值・伺服器PCB", "TW"), "2357": ("華碩", "👑電子權值・AI PC龍頭", "TW"),
-    "2301": ("光寶科", "👑電子權值・雲端電源", "TW"), "4938": ("和碩", "👑電子權值・通訊與車用", "TW"),
-    "2327": ("國巨", "👑電子權值・被動元件龍頭", "TW"), "3008": ("大立光", "👑電子權值・光學鏡頭龍頭", "TW"),
-    "2395": ("研華", "👑電子權值・工業電腦龍頭", "TW"), "5274": ("信驊", "👑電子權值・BMC晶片王", "TWO"),
-    "3529": ("力旺", "👑電子權值・矽智財IP", "TWO"), "3661": ("世芯-KY", "👑電子權值・ASIC晶片", "TW"),
-    "3443": ("創意", "👑電子權值・ASIC矽智財", "TW"), "2449": ("京元電子", "👑電子權值・AI晶片測試", "TW"),
-    "3264": ("欣銓", "👑電子權值・車用與AI測試", "TWO"), "3324": ("雙鴻", "👑電子權值・水冷散熱", "TWO"),
-    "6274": ("台燿", "👑電子權值・高階CCL", "TWO"), "8016": ("矽創", "👑電子權值・驅動與感測IC", "TW"),
-    "5269": ("祥碩", "👑電子權值・高速傳輸IC", "TW"), "6187": ("萬潤", "👑電子權值・CoWoS設備", "TWO"),
-    "3131": ("弘塑", "👑電子權值・CoWoS設備", "TWO"), "3583": ("辛耘", "👑電子權值・先進封裝設備", "TW"),
-    "3558": ("神準", "👑電子權值・企業網通", "TWO"), "6285": ("啟碁", "👑電子權值・車用與衛星網通", "TW")
-}
-
-FINANCIAL_BLUE_CHIPS = {
-    "2881": ("富邦金", "🏦金融權值・獲利王金控", "TW"), "2882": ("國泰金", "🏦金融權值・壽險龍頭金控", "TW"),
-    "2891": ("中信金", "🏦金融權值・消金龍頭金控", "TW"), "2886": ("兆豐金", "🏦金融權值・官股匯銀龍頭", "TW"),
-    "2884": ("玉山金", "🏦金融權值・高成長民營金控", "TW"), "2885": ("元大金", "🏦金融權值・證券龍頭金控", "TW"),
-    "2892": ("第一金", "🏦金融權值・績優官股金控", "TW"), "2880": ("華南金", "🏦金融權值・穩健官股金控", "TW"),
-    "5880": ("合庫金", "🏦金融權值・官股房貸龍頭", "TW"), "2890": ("永豐金", "🏦金融權值・高ROE民營金控", "TW"),
-    "2883": ("凱基金", "🏦金融權值・壽險與創投金控", "TW"), "2887": ("台新金", "🏦金融權值・併購成長金控", "TW"),
-    "2801": ("彰銀", "🏦金融權值・官股核心銀行", "TW"), "2834": ("臺企銀", "🏦金融權值・中小企銀官股", "TW")
-}
-
-CORE_WATCHLIST = {**ELECTRONICS_BLUE_CHIPS, **FINANCIAL_BLUE_CHIPS}
-CONSTRUCTION_BLACKLIST = {"1808", "2501", "2504", "2505", "2506", "2509", "2511", "2515", "2516", "2520", "2524", "2527", "2528", "2530", "2534", "2535", "2536", "2537", "2538", "2539", "2540", "2542", "2543", "2545", "2546", "2547", "2548", "2597", "5522", "5534", "4113", "5529", "5455", "1439", "9906", "7777", "5523"}
-
-def is_traditional_or_construction(code):
-    return (code in CONSTRUCTION_BLACKLIST) or (len(code) == 4 and code[:2] in ["11", "12", "13", "14", "18", "19", "20", "21", "25", "26", "27", "29"])
-
-def compute_kdj(highs, lows, closes, n=9):
-    k_val, d_val, j_val, k_prev, d_prev, j_prev = 50.0, 50.0, 50.0, 50.0, 50.0, 50.0
-    for i in range(len(closes)):
-        k_prev, d_prev, j_prev = k_val, d_val, j_val
-        start_idx = max(0, i - n + 1)
-        hh, ll = np.max(highs[start_idx:i+1]), np.min(lows[start_idx:i+1])
-        rsv = ((closes[i] - ll) / (hh - ll) * 100.0) if (hh != ll) else 50.0
-        k_val = (2.0 / 3.0) * k_val + (1.0 / 3.0) * rsv
-        d_val = (2.0 / 3.0) * d_val + (1.0 / 3.0) * k_val
-        j_val = 3.0 * k_val - 2.0 * d_val
-    return round(k_val, 1), round(d_val, 1), round(j_val, 1), round(j_prev, 1), (k_val >= d_val and k_prev <= d_prev + 3.0)
-
-def compute_dmi(highs, lows, closes, n=14):
-    if len(closes) < n + 5: return 25.0, 25.0, 20.0, 20.0, False
-    h, l, c = pd.Series(highs, dtype=float), pd.Series(lows, dtype=float), pd.Series(closes, dtype=float)
-    up_move, down_move = h.diff(), -l.diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1.0/n, adjust=False).mean()
-    plus_di = 100.0 * pd.Series(plus_dm).ewm(alpha=1.0/n, adjust=False).mean() / atr.replace(0, np.nan)
-    minus_di = 100.0 * pd.Series(minus_dm).ewm(alpha=1.0/n, adjust=False).mean() / atr.replace(0, np.nan)
-    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx = dx.fillna(0.0).ewm(alpha=1.0/n, adjust=False).mean()
-    pdi_now, mdi_now = round(float(plus_di.iloc[-1]), 1), round(float(minus_di.iloc[-1]), 1)
-    pdi_prev, mdi_prev = float(plus_di.iloc[-2]) if len(plus_di) > 1 else pdi_now, float(minus_di.iloc[-2]) if len(minus_di) > 1 else mdi_now
-    adx_now, adx_prev = round(float(adx.iloc[-1]), 1), round(float(adx.iloc[-2]), 1) if len(adx) > 1 else 20.0
-    dmi_bull = (pdi_now > mdi_now) and (adx_now > adx_prev) and ((pdi_prev <= mdi_prev + 4.0) or (pdi_now - mdi_now > pdi_prev - mdi_prev))
-    return pdi_now, mdi_now, adx_now, adx_prev, bool(dmi_bull)
-
-def compute_macd(closes):
-    s = pd.Series(closes)
-    dif = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
-    dea = dif.ewm(span=9, adjust=False).mean()
-    return dif.values, dea.values, (dif - dea).values
-
-@st.cache_data(ttl=600, show_spinner=False)
-def download_historical_klines(yf_tickers_tuple):
-    try: return yf.download(list(yf_tickers_tuple), period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
-    except Exception: return pd.DataFrame()
-
-@st.cache_data(ttl=600, show_spinner=False)
-def download_fleet_history():
-    try: return yf.download(["^TWII", "00631L.TW", "0050.TW", "TWD=X"], period="2y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
-    except Exception: return pd.DataFrame()
-
-@st.cache_data(ttl=120, show_spinner=False)
-def download_fleet_60m():
-    try: return yf.download(["^TWII", "00631L.TW", "0050.TW"], period="2mo", interval="60m", progress=False, group_by="ticker", auto_adjust=False)
-    except Exception: return pd.DataFrame()
-
-def fetch_and_analyze_fleet(rt_quotes):
-    price_dict, _, _, twii_official = fetch_official_market_data()
-    data, data_60m = download_fleet_history(), download_fleet_60m()
-    now_tw = get_tw_now()
-    today_str = now_tw.strftime("%Y-%m-%d")
-    is_market_open_or_after = (now_tw.hour * 60 + now_tw.minute) >= 540
-
-    twii_now = twii_official["close"] if twii_official["close"] > 0 else 44257.2
-    twii_chg_pct = twii_official["chg_pct"]
-    twii_open = twii_high = twii_low = twii_prev_c = twii_now
-    ma5, ma10, ma20, ma60, ma120, ma240 = 41981.0, 43266.0, 45144.0, 46300.0, 45387.0, 39022.0
-    w_ma10, m_ma5 = 46691.0, 45332.0
-    ma5_prev, ma10_prev, ma20_prev, ma60_prev, ma120_prev, ma240_prev = ma5, ma10, ma20, ma60, ma120, ma240
-    deduct_5d, deduct_10d, deduct_20d, deduct_60d, deduct_120d = ma5, ma10, ma20, ma60, ma120
-    bb_upper, bb_lower = 46724.0, 40500.0
-    k9, d9, j9, j9_prev, kd_cross_d = 38.0, 23.6, 81.2, 53.8, True
-    pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = 22.0, 38.0, 34.0, 35.9, False
-    date_str, quote_src = today_str, "Yahoo Finance / 證交所"
-    est_short_cost, target_cover_1, target_cover_2 = 45474.0, 43655.0, 42063.0
-    k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = 86.4, 71.5, 116.4, 111.0, True
-    k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = 31.0, 19.0, 33.0, 31.0, True
-    k60_ma5, k60_ma20, k60_ma60 = 43669.0, 42614.0, 44100.0
-    fx_now, fx_prev, fx_chg_ntd, fx_ma5, fx_ma20 = 32.841, 32.847, -0.006, 32.864, 32.583
-    p_2x, p_2x_chg = price_dict.get("00631L", {}).get("close", 32.53), price_dict.get("00631L", {}).get("chg_pct", 7.54)
-    p_1x, p_1x_chg = price_dict.get("0050", {}).get("close", 103.20), price_dict.get("0050", {}).get("chg_pct", 3.51)
-
-    try:
-        if not data.empty and "^TWII" in data:
-            df_twii = data["^TWII"].dropna(subset=["Close"]).copy()
-            if len(df_twii) >= 25:
-                o_twii, c_twii, h_twii, l_twii, v_twii = df_twii["Open"].values.astype(float), df_twii["Close"].values.astype(float), df_twii["High"].values.astype(float), df_twii["Low"].values.astype(float), df_twii["Volume"].values.astype(float)
-                last_k_date = df_twii.index[-1].strftime("%Y-%m-%d")
-                if "t00" in rt_quotes and rt_quotes["t00"]["close"] > 0 and (is_market_open_or_after or abs(rt_quotes["t00"]["chg_pct"]) > 0.01):
-                    rt_t00 = rt_quotes["t00"]
-                    if last_k_date == today_str or (not is_market_open_or_after):
-                        o_twii[-1] = rt_t00["open"] if rt_t00.get("open", 0) > 0 else o_twii[-1]
-                        c_twii[-1], h_twii[-1], l_twii[-1] = rt_t00["close"], max(h_twii[-1], rt_t00["high"]), min(l_twii[-1], rt_t00["low"])
-                    else:
-                        o_twii = np.append(o_twii, rt_t00["open"] if rt_t00.get("open", 0) > 0 else rt_t00["close"])
-                        c_twii, h_twii, l_twii, v_twii = np.append(c_twii, rt_t00["close"]), np.append(h_twii, rt_t00["high"]), np.append(l_twii, rt_t00["low"]), np.append(v_twii, v_twii[-1])
-                    twii_chg_pct, twii_prev_c = rt_t00["chg_pct"], rt_t00.get("prev_close", float(c_twii[-2]))
-                    date_str, quote_src = f"{today_str} {rt_t00['time']}", f"🟢 證交所 MIS ＆ Yahoo v8 雙源即時對時 ({rt_t00['time']})"
-                else:
-                    twii_prev_c = float(c_twii[-2]) if len(c_twii) > 1 else float(c_twii[-1])
-                    twii_chg_pct = round((float(c_twii[-1]) - twii_prev_c) / twii_prev_c * 100, 2)
-                    date_str = last_k_date
-                twii_open, twii_now, twii_high, twii_low = round(float(o_twii[-1]), 1), round(float(c_twii[-1]), 1), round(float(h_twii[-1]), 1), round(float(l_twii[-1]), 1)
-                ma5, ma10, ma20 = round(float(np.mean(c_twii[-5:])), 1), round(float(np.mean(c_twii[-10:])), 1), round(float(np.mean(c_twii[-20:])), 1)
-                ma60 = round(float(np.mean(c_twii[-60:])), 1) if len(c_twii) >= 60 else ma20
-                ma120 = round(float(np.mean(c_twii[-120:])), 1) if len(c_twii) >= 120 else ma60
-                ma240 = round(float(np.mean(c_twii[-240:])), 1) if len(c_twii) >= 240 else ma120
-                ma5_prev, ma10_prev, ma20_prev = round(float(np.mean(c_twii[-6:-1])), 1), round(float(np.mean(c_twii[-11:-1])), 1), round(float(np.mean(c_twii[-21:-1])), 1)
-                ma60_prev = round(float(np.mean(c_twii[-61:-1])), 1) if len(c_twii) >= 61 else ma60
-                ma120_prev = round(float(np.mean(c_twii[-121:-1])), 1) if len(c_twii) >= 121 else ma120
-                ma240_prev = round(float(np.mean(c_twii[-241:-1])), 1) if len(c_twii) >= 241 else ma240
-                deduct_5d, deduct_10d, deduct_20d = round(float(c_twii[-5]), 1), round(float(c_twii[-10]), 1), round(float(c_twii[-20]), 1)
-                deduct_60d = round(float(c_twii[-60]), 1) if len(c_twii) >= 60 else ma60
-                deduct_120d = round(float(c_twii[-120]), 1) if len(c_twii) >= 120 else ma120
-                std20 = float(np.std(c_twii[-20:]))
-                bb_upper, bb_lower = round(ma20 + 2.0 * std20, 1), round(ma20 - 2.0 * std20, 1)
-                est_short_cost, target_cover_1, target_cover_2 = estimate_foreign_short_cost_and_target(h_twii, l_twii, c_twii, v_twii)
-                k9, d9, j9, j9_prev, kd_cross_d = compute_kdj(h_twii[-60:], l_twii[-60:], c_twii[-60:])
-                pdi_d, mdi_d, adx_d, adx_d_prev, dmi_bull_d = compute_dmi(h_twii[-90:], l_twii[-90:], c_twii[-90:])
-                w_closes = df_twii["Close"].resample("W").last().dropna().values.astype(float)
-                if len(w_closes) > 0:
-                    w_closes[-1] = twii_now
-                    w_ma10 = round(float(np.mean(w_closes[-10:])), 1) if len(w_closes) >= 10 else ma60
-                m_closes = df_twii["Close"].resample("ME").last().dropna().values.astype(float)
-                if len(m_closes) > 0:
-                    m_closes[-1] = twii_now
-                    m_ma5 = round(float(np.mean(m_closes[-5:])), 1) if len(m_closes) >= 5 else ma60
-            if "TWD=X" in data:
-                df_fx = data["TWD=X"].dropna(subset=["Close"]).copy()
-                if len(df_fx) >= 20:
-                    c_fx = df_fx["Close"].values.astype(float)
-                    if "USDTWD" in rt_quotes and rt_quotes["USDTWD"]["close"] > 10.0:
-                        fx_now, fx_prev = round(float(rt_quotes["USDTWD"]["close"]), 3), round(float(rt_quotes["USDTWD"]["prev_close"]), 3)
-                        c_fx[-1] = fx_now
-                    else:
-                        fx_now, fx_prev = round(float(c_fx[-1]), 3), round(float(c_fx[-2]), 3) if len(c_fx) >= 2 else round(float(c_fx[-1]), 3)
-                    fx_chg_ntd, fx_ma5, fx_ma20 = round(fx_now - fx_prev, 3), round(float(np.mean(c_fx[-5:])), 3), round(float(np.mean(c_fx[-20:])), 3)
-            df_2x = data["00631L.TW"].dropna(subset=["Close"])
-            if "00631L" in rt_quotes and rt_quotes["00631L"]["close"] > 0 and abs(rt_quotes["00631L"]["chg_pct"]) > 0.01:
-                p_2x, p_2x_chg = rt_quotes["00631L"]["close"], rt_quotes["00631L"]["chg_pct"]
-            elif len(df_2x) >= 2:
-                p_2x = round(float(df_2x["Close"].values[-1]), 2)
-                p_2x_chg = round((p_2x - float(df_2x["Close"].values[-2])) / float(df_2x["Close"].values[-2]) * 100, 2)
-            df_1x = data["0050.TW"].dropna(subset=["Close"])
-            if "0050" in rt_quotes and rt_quotes["0050"]["close"] > 0 and abs(rt_quotes["0050"]["chg_pct"]) > 0.01:
-                p_1x, p_1x_chg = rt_quotes["0050"]["close"], rt_quotes["0050"]["chg_pct"]
-            elif len(df_1x) >= 2:
-                p_1x = round(float(df_1x["Close"].values[-1]), 2)
-                p_1x_chg = round((p_1x - float(df_1x["Close"].values[-2])) / float(df_1x["Close"].values[-2]) * 100, 2)
-    except Exception: pass
-
-    try:
-        if not data_60m.empty and "^TWII" in data_60m:
-            df_60 = data_60m["^TWII"].dropna(subset=["Close"]).copy()
-            if len(df_60) >= 30:
-                c_60, h_60, l_60 = df_60["Close"].values.astype(float), df_60["High"].values.astype(float), df_60["Low"].values.astype(float)
-                if abs(c_60[-1] - twii_now) > 1.0: c_60[-1], h_60[-1], l_60[-1] = twii_now, max(h_60[-1], twii_now), min(l_60[-1], twii_now)
-                k60_ma5, k60_ma20 = round(float(np.mean(c_60[-5:])), 1), round(float(np.mean(c_60[-20:])), 1)
-                k60_ma60 = round(float(np.mean(c_60[-60:])), 1) if len(c_60) >= 60 else k60_ma20
-                k60_k, k60_d, k60_j, k60_j_prev, k60_kd_cross = compute_kdj(h_60[-60:], l_60[-60:], c_60[-60:])
-                k60_pdi, k60_mdi, k60_adx, k60_adx_prev, k60_dmi_bull = compute_dmi(h_60[-80:], l_60[-80:], c_60[-80:])
-    except Exception: pass
-
-    bias_5, bias_10, bias_20 = round((twii_now - ma5) / max(1.0, ma5) * 100, 2), round((twii_now - ma10) / max(1.0, ma10) * 100, 2), round((twii_now - ma20) / max(1.0, ma20) * 100, 2)
-    bias_60, bias_120 = round((twii_now - ma60) / max(1.0, ma60) * 100, 2), round((twii_now - ma120) / max(1.0, ma120) * 100, 2)
-
-    raw_deriv = fetch_auto_derivatives_base(price_dict)
-    live_maint = compute_dynamic_pure_stock_maint(twii_now, ma20, ma60)
-    fini_oi, fini_chg, sitc_oi, sitc_tx_chg = raw_deriv["fini_tx_oi"], raw_deriv["fini_tx_chg"], raw_deriv["sitc_tx_oi"], raw_deriv["sitc_tx_chg"]
-    fini_mtx_chg, retail_mtx_chg = raw_deriv["fini_mtx_chg"], raw_deriv["retail_mtx_chg"]
-
-    deriv_info = {
-        "fini_tx_oi": fini_oi, "fini_tx_chg": fini_chg, "sitc_tx_oi": sitc_oi, "sitc_tx_chg": sitc_tx_chg,
-        "fini_mtx_chg": fini_mtx_chg, "retail_mtx_chg": retail_mtx_chg,
-        "real_fini_oi": fini_oi + sitc_oi, "est_short_cost": est_short_cost, "target_cover_1": target_cover_1, "target_cover_2": target_cover_2,
-        "short_profit_pts": round(est_short_cost - twii_now, 0), "short_profit_pct": round((est_short_cost - twii_now) / max(1.0, est_short_cost) * 100.0, 2),
-        "pc_ratio": raw_deriv["pc_ratio"], "warrant_hedge_yi": raw_deriv["warrant_hedge_yi"],
-        "stock_only_maint_pct": live_maint, "fut_src": f"期交所官方直連 ({raw_deriv['fut_date']} 區分大台/小台)",
-        "fx_now": fx_now, "fx_prev": fx_prev, "fx_chg_ntd": fx_chg_ntd, "fx_ma5": fx_ma5, "fx_ma20": fx_ma20
-    }
-    return {
-        "twii_open": twii_open, "twii_prev_c": round(twii_prev_c, 1), "twii_now": twii_now, "twii_chg_pct": twii_chg_pct,
-        "twii_high": twii_high, "twii_low": twii_low, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60, "ma120": ma120, "ma240": ma240,
-        "ma5_prev": ma5_prev, "ma10_prev": ma10_prev, "ma20_prev": ma20_prev, "ma60_prev": ma60_prev, "ma120_prev": ma120_prev, "ma240_prev": ma240_prev,
-        "deduct_5d": deduct_5d, "deduct_10d": deduct_10d, "deduct_20d": deduct_20d, "deduct_60d": deduct_60d, "deduct_120d": deduct_120d,
-        "w_ma10": w_ma10, "m_ma5": m_ma5, "bb_upper": bb_upper, "bb_lower": bb_lower,
-        "bias_5": bias_5, "bias_10": bias_10, "bias_20": bias_20, "bias_60": bias_60, "bias_120": bias_120,
-        "k9": k9, "d9": d9, "j9": j9, "j9_prev": j9_prev, "kd_cross_d": kd_cross_d,
-        "pdi_d": pdi_d, "mdi_d": mdi_d, "adx_d": adx_d, "adx_d_prev": adx_d_prev, "dmi_bull_d": dmi_bull_d,
-        "k60_k": k60_k, "k60_d": k60_d, "k60_j": k60_j, "k60_j_prev": k60_j_prev,
-        "k60_pdi": k60_pdi, "k60_mdi": k60_mdi, "k60_adx": k60_adx, "k60_adx_prev": k60_adx_prev,
-        "k60_ma5": k60_ma5, "k60_ma20": k60_ma20, "k60_ma60": k60_ma60,
-        "p_2x": p_2x, "p_2x_chg": p_2x_chg, "p_1x": p_1x, "p_1x_chg": p_1x_chg, "date_str": date_str, "quote_src": quote_src, "deriv": deriv_info
-    }
-
-def scan_all_stocks():
+                    latest_d = dates
     price_dict, tdcc_dict, rev_dict, _ = fetch_official_market_data()
     cb_set = fetch_active_cb_codes()
     vol_mult, vol_note = get_volume_multiplier()
