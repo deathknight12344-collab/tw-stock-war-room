@@ -2455,7 +2455,7 @@ with tab1:
 </div>
 <div style="font-size:15px; color:#e2e8f0; background:rgba(0,0,0,0.35); padding:8px 14px; border-radius:8px; margin-bottom:12px; line-height:1.65;">
 • 🕒 <b>行情對時與當日高低區間</b>：<b>{fleet['date_str']}</b>（開盤 <b>{twii_open:,.0f}</b> ／ 最低 <b>{fleet['twii_low']:,.0f}</b> ～ 最高 <b>{fleet['twii_high']:,.0f}</b> ／ 昨收 <b>{twii_prev_c:,.0f}</b>）<br>
-• ⚡ <b>多空評分演算明細與分級標準</b>：{trace_str}（註：<b>75~100分</b>強勢多頭、<b>60~74分</b>偏多推進、<b>45~59分</b>月線反壓下震盪換手、<b>&lt;45分</b>空方尋底）
+• ⚡ <b>多空評分演算明細與分級標準</b>：{circuit_trace_str}（註：<b>75~100分</b>強勢多頭、<b>60~74分</b>偏多推進、<b>45~59分</b>月線反壓下震盪換手、<b>&lt;45分</b>空方尋底）
 </div>
 
 <div class="exec-summary-box">
