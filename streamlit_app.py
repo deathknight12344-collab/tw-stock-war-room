@@ -6,7 +6,7 @@ import datetime, pytz, requests, urllib3, io, os, json, time, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股每日戰情室 v56.0", page_icon="🧭", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股每日戰情室 v57.0", page_icon="🧭", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -67,8 +67,107 @@ def style_tw_stock_df(df):
     try: return df.style.map(color_tw_val, subset=target_cols).format(fmt_dict, na_rep="-")
     except Exception: return df
 
+# ==========================================
+# 模組 0：宏爺「三大新穀倉 vs. 政策內需防彈衣 vs. 最後一隻老鼠(防墊料壓貨)」核心定義與財報偵測引擎
+# ==========================================
+GRANARY_1_CSP_COMMON = {"2330", "3711", "3661", "3443", "2454", "6515", "6223", "2383", "2368"}
+GRANARY_2_POWER_THERMAL = {"2308", "2301", "3017", "3324", "3653", "3211", "1519", "1503"}
+GRANARY_3_EDGE_MEMORY = {"3008", "3406", "2317", "6239", "3034"}
+POLICY_DEFENSE_ARMOR = {"1513", "1514", "8936", "9933", "6139", "2886", "2891", "2892", "5880", "2801", "2834"}
+OLD_GRANARY_ODM_WATCH = {"2382", "6669", "3231", "2356", "3706"}
+
+# 2026 Q3 最新官方季報「存貨季增幅 (Inv QoQ%)」、「應收帳款季增幅 (AR QoQ%)」與「營業現金流 (OCF 億元)」實績定錨庫
+ODM_Q3_OFFICIAL_BASE = {
+    "3231": {"inv_qoq": 20.4, "ar_qoq": 14.5, "ocf_positive": False, "note": "Q3存貨6,418億(季增+20.4%)且前三季營業現金流為負"},
+    "2382": {"inv_qoq": 8.3, "ar_qoq": 21.7, "ocf_positive": False, "note": "Q3存貨8,561億、應收帳款9,318億(季增+21.7%)墊款高"},
+    "2356": {"inv_qoq": 21.2, "ar_qoq": 16.0, "ocf_positive": False, "note": "伺服器備料存貨季增逾20%且營業現金流淨流出"},
+    "3706": {"inv_qoq": 19.5, "ar_qoq": 15.2, "ocf_positive": False, "note": "機櫃備料存貨與應收帳款同步攀升"},
+    "6669": {"inv_qoq": 11.5, "ar_qoq": 9.8, "ocf_positive": True, "note": "ASIC自研伺服器佔比高、客供料模式現金流穩健"}
+}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_odm_inventory_ocf_health(codes_tuple):
+    """
+    串接 yfinance 季財報 (quarterly_balance_sheet 與 quarterly_cashflow)，
+    自動計算「存貨季增幅 (Inventory QoQ%)」與「營業現金流 (Operating Cash Flow)」，並以官方 Q3 財報實績雙重保底
+    """
+    health_map = dict(ODM_Q3_OFFICIAL_BASE)
+    for code in codes_tuple:
+        if code not in OLD_GRANARY_ODM_WATCH:
+            continue
+        try:
+            tkr = yf.Ticker(f"{code}.TW")
+            bs = tkr.quarterly_balance_sheet
+            cf = tkr.quarterly_cashflow
+            inv_qoq_val = None
+            ocf_pos_val = None
+            if bs is not None and not bs.empty and bs.shape[1] >= 2:
+                inv_row = next((idx for idx in bs.index if "Inventory" in str(idx) or "Inventories" in str(idx)), None)
+                if inv_row is not None:
+                    v_curr = float(bs.loc[inv_row].iloc[0])
+                    v_prev = float(bs.loc[inv_row].iloc[1])
+                    if v_prev > 0 and pd.notna(v_curr):
+                        inv_qoq_val = round(((v_curr - v_prev) / v_prev) * 100.0, 1)
+            if cf is not None and not cf.empty and cf.shape[1] >= 1:
+                ocf_row = next((idx for idx in cf.index if "Operating Cash Flow" in str(idx) or "Cash Flow From Continuing Operating" in str(idx)), None)
+                if ocf_row is not None:
+                    ocf_v = float(cf.loc[ocf_row].iloc[0])
+                    if pd.notna(ocf_v):
+                        ocf_pos_val = bool(ocf_v > 0)
+            if inv_qoq_val is not None and ocf_pos_val is not None:
+                base_n = health_map.get(code, {}).get("note", "")
+                health_map[code] = {
+                    "inv_qoq": inv_qoq_val,
+                    "ar_qoq": health_map.get(code, {}).get("ar_qoq", 0.0),
+                    "ocf_positive": ocf_pos_val,
+                    "note": base_n or f"存貨QoQ {inv_qoq_val:+.1f}%｜營業現金流{'正' if ocf_pos_val else '負'}"
+                }
+        except Exception:
+            continue
+    return health_map
+
+def evaluate_granary_and_anti_trap(code: str, single_yoy, odm_health_map: dict, macro_withdrawal_alert: bool = False) -> tuple[str, int, str]:
+    """
+    計算個股之「宏爺穀倉賽道標籤」、「防墊料加減分」與「財報診斷說明」：
+    - 🌟 新穀倉1 (CSP自研/共通規格)：+15分 (若觸發外資利差提款警戒，額外 +8分 置頂)
+    - ⚡ 新穀倉2 (缺電/過熱基建)：+10分
+    - 📱 新穀倉3 (邊緣AI與記憶體封測)：+5分
+    - 🛡️ 政策內需防彈衣 (兆元投資/重電/水資源/工程/金控)：平時 +8分，觸發外資利差提款警戒時 +18分 強力置頂！
+    - ⚠️ 舊穀倉墊料觀察名單 (純伺服器組裝ODM)：若月營收 YoY > 0 但 (存貨QoQ >= 20% 或 應收帳款QoQ >= 20%) 且 營業現金流為負 ➔ 強制標記「🐀 警戒：疑似墊料壓貨」並扣減 20 分！
+    """
+    yoy_pos = (single_yoy is None) or (pd.notna(single_yoy) and float(single_yoy) > 0.0)
+
+    if code in OLD_GRANARY_ODM_WATCH:
+        h_info = odm_health_map.get(code, {})
+        inv_qoq = h_info.get("inv_qoq", 0.0)
+        ar_qoq = h_info.get("ar_qoq", 0.0)
+        ocf_pos = h_info.get("ocf_positive", True)
+        note_s = h_info.get("note", "純伺服器組裝ODM")
+        if yoy_pos and (inv_qoq >= 19.0 or ar_qoq >= 20.0) and (not ocf_pos):
+            return f"🐀 警戒：疑似墊料壓貨 (-20分｜{note_s})", -20, "⚠️舊穀倉墊料壓貨"
+        elif code == "6669" and ocf_pos:
+            return f"🔄 雙棲：ASIC自研伺服器 (+8分｜{note_s})", +8, "🔄ASIC自研雙棲"
+        else:
+            return f"⚠️ 舊穀倉ODM觀察 (-10分｜{note_s})", -10, "⚠️舊穀倉ODM觀察"
+
+    if code in GRANARY_1_CSP_COMMON:
+        bonus = 23 if macro_withdrawal_alert else 15
+        return f"🌟 新穀倉1：CSP自研/共通規格 (+{bonus}分・無墊料風險)", bonus, "🌟新穀倉1(共通規格)"
+    if code in GRANARY_2_POWER_THERMAL:
+        bonus = 14 if macro_withdrawal_alert else 10
+        return f"⚡ 新穀倉2：缺電/過熱基建 (+{bonus}分・剛性升級)", bonus, "⚡新穀倉2(電力散熱)"
+    if code in GRANARY_3_EDGE_MEMORY:
+        return "📱 新穀倉3：邊緣AI與記憶體封測 (+5分・終端轉嫁)", 5, "📱新穀倉3(邊緣封測)"
+    if code in POLICY_DEFENSE_ARMOR:
+        bonus = 18 if macro_withdrawal_alert else 8
+        return f"🛡️ 政策內需防彈衣 (+{bonus}分・兆元內需/外資提款避風港)", bonus, "🛡️政策內需防彈衣"
+
+    return "➖ 一般電子/題材股 (+0分)", 0, "➖一般題材"
+
 def classify_revenue_note_quality(note_txt, sector_str="", code_str=""):
     s = str(note_txt).strip()
+    if code_str in POLICY_DEFENSE_ARMOR:
+        return "🛡️ 政策兆元內需/公用工程護城河"
     if "建材營造" in sector_str or "營造" in sector_str or any(k in s for k in ["建案", "交屋", "房地", "不動產", "過戶", "營建", "售地"]):
         return "🏗️ 營建交屋認列(排除波段)"
     if not s or s in ["-", "無", "NA", "None", "nan"]:
@@ -153,8 +252,12 @@ def fetch_official_3rates_and_cum_eps():
         except Exception: continue
     return fin_dict
 
-MARGIN_DILUTION_SET = {"2382", "3231", "2317", "4938", "2356", "2324"}
-MARGIN_EXPANSION_SET = {"2330", "3017", "3324", "3653", "2059", "2383", "2368", "6274", "2345", "2308", "3711", "6239", "6187", "3131", "3583", "5274", "2301", "3443", "3661", "2454"}
+MARGIN_DILUTION_SET = {"2382", "3231", "2317", "4938", "2356", "2324", "3706"}
+MARGIN_EXPANSION_SET = {
+    "2330", "3017", "3324", "3653", "2059", "2383", "2368", "6274", "2345",
+    "2308", "3711", "6239", "6187", "3131", "3583", "5274", "2301", "3443",
+    "3661", "2454", "6515", "6223", "1519", "1503", "1513"
+}
 
 def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_official, support_price=None):
     if curr_p is None or pd.isna(curr_p) or curr_p <= 0:
@@ -162,9 +265,9 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
 
     is_fin = ("金融" in sector_str) or (code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834"])
     if is_fin: pe_low, pe_high = 12.0, 15.5
-    elif any(k in sector_str for k in ["IC設計", "矽智財", "散熱", "BMC", "ASIC", "高速傳輸", "CoWoS"]) or code in ["2454", "3034", "2379", "3017", "3653", "2059", "5274", "3529", "3661", "3443", "6669", "3324", "5269", "6187", "3131"]:
+    elif any(k in sector_str for k in ["IC設計", "矽智財", "散熱", "BMC", "ASIC", "高速傳輸", "CoWoS", "探針", "重電"]) or code in ["2454", "3034", "2379", "3017", "3653", "2059", "5274", "3529", "3661", "3443", "6669", "3324", "5269", "6187", "3131", "6515", "6223", "1519"]:
         pe_low, pe_high = 20.0, 28.0
-    elif any(k in sector_str for k in ["晶圓", "封測", "扇形封裝", "CCL", "PCB", "連接器", "鏡頭", "電源"]) or code in ["2330", "3711", "6239", "2308", "3533", "2383", "2368", "3008", "2449", "3264", "6274"]:
+    elif any(k in sector_str for k in ["晶圓", "封測", "扇形封裝", "CCL", "PCB", "連接器", "鏡頭", "電源", "機電", "水資源"]) or code in ["2330", "3711", "6239", "2308", "3533", "2383", "2368", "3008", "3406", "2449", "3264", "6274", "1503", "1513", "1514", "8936", "6139"]:
         pe_low, pe_high = 16.0, 22.0
     else: pe_low, pe_high = 14.0, 18.5
 
@@ -307,7 +410,7 @@ US_SECTOR_DEFINITIONS = [
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_us_sectors_and_leaders():
-    all_syms = ["%5EVIX", "%5ESOX", "NQ=F"]
+    all_syms = ["%5EVIX", "%5ESOX", "%5ETNX", "NQ=F"]
     for etf_sym, _, leaders in US_SECTOR_DEFINITIONS:
         all_syms.append(etf_sym)
         for l_sym, _ in leaders:
@@ -316,12 +419,18 @@ def fetch_us_sectors_and_leaders():
 
     quotes_map = {}
     with ThreadPoolExecutor(max_workers=12) as executor:
-        fut_map = {executor.submit(fetch_yahoo_v8_realtime, sym, 2): sym for sym in all_syms}
+        fut_map = {executor.submit(fetch_yahoo_v8_realtime, sym, 3): sym for sym in all_syms}
         for fut in as_completed(fut_map):
             sym_k = fut_map[fut]
             res_q = fut.result()
             if res_q:
                 quotes_map[sym_k] = res_q
+
+    # 讀取美國 10 年期公債殖利率 (^TNX)，自動正規化至百分比 (如 5.13%)
+    tnx_q = quotes_map.get("%5ETNX", {})
+    tnx_raw = tnx_q.get("close", 5.13)
+    tnx_val = round(tnx_raw / 10.0, 2) if tnx_raw > 15.0 else round(tnx_raw, 2)
+    tnx_chg = tnx_q.get("chg_pct", +0.85)
 
     tsm_q = quotes_map.get("TSM", {})
     m_state = tsm_q.get("mkt_state", "CLOSED")
@@ -362,6 +471,8 @@ def fetch_us_sectors_and_leaders():
     return {
         "session_tag": us_session_tag,
         "quotes": quotes_map,
+        "tnx_val": tnx_val,
+        "tnx_chg": tnx_chg,
         "nq_chg": nq_chg,
         "top_up_sectors": top_up_sectors,
         "bot_dn_sectors": bot_dn_sectors
@@ -608,8 +719,8 @@ def fetch_all_monthly_revenue_df(price_dict):
             return float(s) if s not in ["", "-", "--", "N/A", "None", "不適用"] else np.nan
         except Exception: return np.nan
 
-    def build_turnaround_tag(curr_rev_k, yoy_pct, mom_pct, cum_rev_k, cum_yoy_pct, sector_str, note_str=""):
-        if "建材營造" in sector_str or "營造" in sector_str or any(k in str(note_str) for k in ["建案", "交屋", "房地", "不動產", "過戶", "營建", "售地"]):
+    def build_turnaround_tag(curr_rev_k, yoy_pct, mom_pct, cum_rev_k, cum_yoy_pct, sector_str, note_str="", code_str=""):
+        if (code_str not in POLICY_DEFENSE_ARMOR) and ("建材營造" in sector_str or "營造" in sector_str or any(k in str(note_str) for k in ["建案", "交屋", "房地", "不動產", "過戶", "營建", "售地"])):
             return "🏗️ 營建入帳認列(排除波段)"
         if "評價損益" in note_str or "投資標的" in note_str:
             return "💼 投資評價變動(非本業實業)"
@@ -652,7 +763,7 @@ def fetch_all_monthly_revenue_df(price_dict):
                     note_qual = classify_revenue_note_quality(note_txt, sector, code)
                     records_by_code[code] = {
                         "資料年月": ym_raw, "市場": mkt_label, "代碼": code, "公司名稱": name, "產業別": sector or "電子/其他",
-                        "轉機與成長型態": build_turnaround_tag(rev_curr_k, yoy_pct, mom_pct, cum_rev_k, cum_yoy_pct, sector, note_txt),
+                        "轉機與成長型態": build_turnaround_tag(rev_curr_k, yoy_pct, mom_pct, cum_rev_k, cum_yoy_pct, sector, note_txt, code),
                         "備註AI真偽鑑別": note_qual, "CB可轉債": cb_badge,
                         "法人動向": inst_tag, "外資買賣(張)": f_lots, "投信買賣(張)": s_lots,
                         "現價": curr_p, "今日%": p_info.get("chg_pct", np.nan),
@@ -709,7 +820,7 @@ def fetch_all_monthly_revenue_df(price_dict):
                                 note_qual = classify_revenue_note_quality(final_note, sector, code)
                                 records_by_code[code] = {
                                     "資料年月": latest_ym_str, "市場": mkt_label, "代碼": code, "公司名稱": clean_name, "產業別": sector,
-                                    "轉機與成長型態": build_turnaround_tag(rev_curr_k, yoy_pct, mom_pct, cum_rev_k, cum_yoy_pct, sector, final_note),
+                                    "轉機與成長型態": build_turnaround_tag(rev_curr_k, yoy_pct, mom_pct, cum_rev_k, cum_yoy_pct, sector, final_note, code),
                                     "備註AI真偽鑑別": note_qual, "CB可轉債": cb_badge,
                                     "法人動向": inst_tag, "外資買賣(張)": f_lots, "投信買賣(張)": s_lots,
                                     "現價": curr_p, "今日%": p_info.get("chg_pct", existing.get("今日%", np.nan)),
@@ -792,7 +903,6 @@ def compute_dynamic_pure_stock_maint(twii_now, ma20, ma60):
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_auto_derivatives_base(price_dict):
     headers = {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}
-    # 保底基準已更新為 2026/11/12 盤後最新確定數據（外資大台 +4,733口 / 未平倉 -99,573口）
     res = {
         "fini_tx_oi": -99573, "fini_tx_chg": 4733, "sitc_tx_oi": 98901, "sitc_tx_chg": -2969, "dealer_tx_chg": -1764,
         "fini_mtx_oi": 4545, "fini_mtx_chg": 206, "sitc_mtx_chg": 0, "dealer_mtx_chg": -585, "retail_mtx_chg": 379,
@@ -880,43 +990,58 @@ def fetch_auto_derivatives_base(price_dict):
         except Exception: continue
     return res
 
+# 全面整合「宏爺三大新穀倉 ＋ 政策內需防彈衣 ＋ 舊穀倉墊料觀察股」至核心常駐監控池
 ELECTRONICS_BLUE_CHIPS = {
-    "2330": ("台積電", "👑電子權值・晶圓龍頭", "TW"), "2317": ("鴻海", "👑電子權值・AI伺服器", "TW"),
-    "2454": ("聯發科", "👑電子權值・IC設計龍頭", "TW"), "2308": ("台達電", "👑電子權值・電源與儲能", "TW"),
-    "2382": ("廣達", "👑電子權值・AI伺服器", "TW"), "3711": ("日月光投控", "👑電子權值・先進封測", "TW"),
-    "6239": ("力成", "👑電子權值・FOPLP扇形封裝龍頭", "TW"),
-    "3034": ("聯詠", "👑電子權值・IC設計", "TW"), "2379": ("瑞昱", "👑電子權值・網通IC", "TW"),
-    "6669": ("緯穎", "👑電子權值・AI伺服器", "TW"), "3231": ("緯創", "👑電子權值・AI伺服器", "TW"),
-    "2345": ("智邦", "👑電子權值・高階網通", "TW"), "3017": ("奇鋐", "👑電子權值・AI散熱", "TW"),
-    "3533": ("嘉澤", "👑電子權值・高速連接器", "TW"), "3653": ("健策", "👑電子權值・均熱片龍頭", "TW"),
-    "2059": ("川湖", "👑電子權值・伺服器導軌", "TW"), "2383": ("台光電", "👑電子權值・高頻CCL", "TW"),
-    "2368": ("金像電", "👑電子權值・伺服器PCB", "TW"), "2357": ("華碩", "👑電子權值・AI PC龍頭", "TW"),
-    "2301": ("光寶科", "👑電子權值・雲端電源", "TW"), "4938": ("和碩", "👑電子權值・通訊與車用", "TW"),
-    "2327": ("國巨", "👑電子權值・被動元件龍頭", "TW"), "3008": ("大立光", "👑電子權值・光學鏡頭龍頭", "TW"),
+    "2330": ("台積電", "🌟新穀倉1・晶圓龍頭", "TW"), "3711": ("日月光投控", "🌟新穀倉1・先進封測", "TW"),
+    "3661": ("世芯-KY", "🌟新穀倉1・ASIC晶片", "TW"), "3443": ("創意", "🌟新穀倉1・ASIC矽智財", "TW"),
+    "2454": ("聯發科", "🌟新穀倉1・IC設計龍頭", "TW"), "6515": ("穎崴", "🌟新穀倉1・AI測試座龍頭", "TW"),
+    "6223": ("旺矽", "🌟新穀倉1・CPC探針卡龍頭", "TWO"), "2383": ("台光電", "🌟新穀倉1・高頻CCL龍頭", "TW"),
+    "2368": ("金像電", "🌟新穀倉1・伺服器PCB", "TW"), "2308": ("台達電", "⚡新穀倉2・電源與液冷基建", "TW"),
+    "2301": ("光寶科", "⚡新穀倉2・雲端電源與BBU", "TW"), "3017": ("奇鋐", "⚡新穀倉2・AI水冷散熱", "TW"),
+    "3324": ("雙鴻", "⚡新穀倉2・水冷散熱", "TWO"), "3653": ("健策", "⚡新穀倉2・均熱片龍頭", "TW"),
+    "3211": ("順達", "⚡新穀倉2・BBU電池模組", "TWO"), "1519": ("華城", "⚡新穀倉2・AI變壓器重電", "TW"),
+    "1503": ("士電", "⚡新穀倉2・重電與變壓器", "TW"), "3008": ("大立光", "📱新穀倉3・光學鏡頭龍頭", "TW"),
+    "3406": ("玉晶光", "📱新穀倉3・邊緣AI光學", "TW"), "2317": ("鴻海", "📱新穀倉3・AI機櫃與iPhone", "TW"),
+    "6239": ("力成", "📱新穀倉3・FOPLP與記憶體封測", "TW"), "3034": ("聯詠", "📱新穀倉3・邊緣AI驅動IC", "TW"),
+    "2382": ("廣達", "⚠️舊穀倉觀察・AI伺服器ODM", "TW"), "6669": ("緯穎", "🔄雙棲觀察・ASIC與通用伺服器", "TW"),
+    "3231": ("緯創", "⚠️舊穀倉觀察・AI伺服器ODM", "TW"), "2356": ("英業達", "⚠️舊穀倉觀察・伺服器ODM", "TW"),
+    "3706": ("神達", "⚠️舊穀倉觀察・伺服器機櫃", "TW"), "2379": ("瑞昱", "👑電子權值・網通IC", "TW"),
+    "2345": ("智邦", "👑電子權值・高階網通", "TW"), "3533": ("嘉澤", "👑電子權值・高速連接器", "TW"),
+    "2059": ("川湖", "👑電子權值・伺服器導軌", "TW"), "2357": ("華碩", "👑電子權值・AI PC龍頭", "TW"),
+    "4938": ("和碩", "👑電子權值・通訊與車用", "TW"), "2327": ("國巨", "👑電子權值・被動元件龍頭", "TW"),
     "2395": ("研華", "👑電子權值・工業電腦龍頭", "TW"), "5274": ("信驊", "👑電子權值・BMC晶片王", "TWO"),
-    "3529": ("力旺", "👑電子權值・矽智財IP", "TWO"), "3661": ("世芯-KY", "👑電子權值・ASIC晶片", "TW"),
-    "3443": ("創意", "👑電子權值・ASIC矽智財", "TW"), "2449": ("京元電子", "👑電子權值・AI晶片測試", "TW"),
-    "3264": ("欣銓", "👑電子權值・車用與AI測試", "TWO"), "3324": ("雙鴻", "👑電子權值・水冷散熱", "TWO"),
-    "6274": ("台燿", "👑電子權值・高階CCL", "TWO"), "8016": ("矽創", "👑電子權值・驅動與感測IC", "TW"),
-    "5269": ("祥碩", "👑電子權值・高速傳輸IC", "TW"), "6187": ("萬潤", "👑電子權值・CoWoS設備", "TWO"),
-    "3131": ("弘塑", "👑電子權值・CoWoS設備", "TWO"), "3583": ("辛耘", "👑電子權值・先進封裝設備", "TW"),
-    "3558": ("神準", "👑電子權值・企業網通", "TWO"), "6285": ("啟碁", "👑電子權值・車用與衛星網通", "TW")
+    "3529": ("力旺", "👑電子權值・矽智財IP", "TWO"), "2449": ("京元電子", "👑電子權值・AI晶片測試", "TW"),
+    "3264": ("欣銓", "👑電子權值・車用與AI測試", "TWO"), "6274": ("台燿", "👑電子權值・高階CCL", "TWO"),
+    "8016": ("矽創", "👑電子權值・驅動與感測IC", "TW"), "5269": ("祥碩", "👑電子權值・高速傳輸IC", "TW"),
+    "6187": ("萬潤", "👑電子權值・CoWoS設備", "TWO"), "3131": ("弘塑", "👑電子權值・CoWoS設備", "TWO"),
+    "3583": ("辛耘", "👑電子權值・先進封裝設備", "TW"), "3558": ("神準", "👑電子權值・企業網通", "TWO"),
+    "6285": ("啟碁", "👑電子權值・車用與衛星網通", "TW")
+}
+
+POLICY_DEFENSE_CHIPS = {
+    "1513": ("中興電", "🛡️政策防彈衣・GIS強韌電網龍頭", "TW"),
+    "1514": ("亞力", "🛡️政策防彈衣・半導體配電與電網", "TW"),
+    "8936": ("國統", "🛡️政策防彈衣・海淡廠與水資源龍頭", "TW"),
+    "9933": ("中鼎", "🛡️政策防彈衣・兆元統包工程龍頭", "TW"),
+    "6139": ("亞翔", "🛡️政策防彈衣・半導體無塵室與水電工程", "TW")
 }
 
 FINANCIAL_BLUE_CHIPS = {
+    "2886": ("兆豐金", "🛡️政策防彈衣・官股匯銀龍頭", "TW"), "2891": ("中信金", "🛡️政策防彈衣・消金龍頭金控", "TW"),
     "2881": ("富邦金", "🏦金融權值・獲利王金控", "TW"), "2882": ("國泰金", "🏦金融權值・壽險龍頭金控", "TW"),
-    "2891": ("中信金", "🏦金融權值・消金龍頭金控", "TW"), "2886": ("兆豐金", "🏦金融權值・官股匯銀龍頭", "TW"),
     "2884": ("玉山金", "🏦金融權值・高成長民營金控", "TW"), "2885": ("元大金", "🏦金融權值・證券龍頭金控", "TW"),
-    "2892": ("第一金", "🏦金融權值・績優官股金控", "TW"), "2880": ("華南金", "🏦金融權值・穩健官股金控", "TW"),
-    "5880": ("合庫金", "🏦金融權值・官股房貸龍頭", "TW"), "2890": ("永豐金", "🏦金融權值・高ROE民營金控", "TW"),
+    "2892": ("第一金", "🛡️政策防彈衣・績優官股金控", "TW"), "2880": ("華南金", "🏦金融權值・穩健官股金控", "TW"),
+    "5880": ("合庫金", "🛡️政策防彈衣・官股房貸龍頭", "TW"), "2890": ("永豐金", "🏦金融權值・高ROE民營金控", "TW"),
     "2883": ("凱基金", "🏦金融權值・壽險與創投金控", "TW"), "2887": ("台新金", "🏦金融權值・併購成長金控", "TW"),
-    "2801": ("彰銀", "🏦金融權值・官股核心銀行", "TW"), "2834": ("臺企銀", "🏦金融權值・中小企銀官股", "TW")
+    "2801": ("彰銀", "🛡️政策防彈衣・官股核心銀行", "TW"), "2834": ("臺企銀", "🛡️政策防彈衣・中小企銀官股", "TW")
 }
 
-CORE_WATCHLIST = {**ELECTRONICS_BLUE_CHIPS, **FINANCIAL_BLUE_CHIPS}
+CORE_WATCHLIST = {**ELECTRONICS_BLUE_CHIPS, **POLICY_DEFENSE_CHIPS, **FINANCIAL_BLUE_CHIPS}
 CONSTRUCTION_BLACKLIST = {"1808", "2501", "2504", "2505", "2506", "2509", "2511", "2515", "2516", "2520", "2524", "2527", "2528", "2530", "2534", "2535", "2536", "2537", "2538", "2539", "2540", "2542", "2543", "2545", "2546", "2547", "2548", "2597", "5522", "5534", "4113", "5529", "5455", "1439", "9906", "7777", "5523"}
 
 def is_traditional_or_construction(code):
+    if code in POLICY_DEFENSE_ARMOR or code in GRANARY_2_POWER_THERMAL:
+        return False
     return (code in CONSTRUCTION_BLACKLIST) or (len(code) == 4 and code[:2] in ["11", "12", "13", "14", "18", "19", "20", "21", "25", "26", "27", "29"])
 
 def compute_kdj(highs, lows, closes, n=9):
@@ -1125,9 +1250,16 @@ def scan_all_stocks():
     rt_quotes = fetch_mis_realtime_batch(tuple(mis_targets))
     yf_map = {f"{c}.{'TW' if m == 'TW' else 'TWO'}": c for c, (_, _, m) in candidates.items()}
     raw_df = download_historical_klines(tuple(yf_map.keys()))
-    list_tab2_launch, list_tab2_pullback, list_tab2_orbit, list_tab3_core_bluechip, list_tab3_turnaround_or_dip = [], [], [], [], []
 
-    # 儲存全體掃描個股之「今日預估量 vs 昨日成交量比 (yod_vol_ratio)」供熱門族群雷達聚合運算
+    # 檢查宏觀利差提款警戒 (^TNX > 5.0% 且 台幣 > 32.5元) 與 ODM 季報存貨/營業現金流
+    us_sec_info = fetch_us_sectors_and_leaders()
+    tnx_now = us_sec_info.get("tnx_val", 5.13)
+    fx_rt_val = rt_quotes.get("USDTWD", {}).get("close", 32.84)
+    macro_withdrawal_alert = bool(tnx_now >= 5.0 and fx_rt_val >= 32.50)
+    odm_health_map = fetch_odm_inventory_ocf_health(tuple(OLD_GRANARY_ODM_WATCH))
+
+    list_tab2_launch, list_tab2_pullback, list_tab2_orbit, list_tab3_core_bluechip, list_tab3_turnaround_or_dip = [], [], [], [], []
+    list_granary_audit = []
     scanned_sector_records = []
 
     for yf_tkr, code in yf_map.items():
@@ -1203,19 +1335,32 @@ def scan_all_stocks():
             yoy_str = f"{yoy_val:+.1f}%" if yoy_val is not None else "待公告"
             cum_yoy_str = f"{cum_yoy_val:+.1f}%" if cum_yoy_val is not None else "待公告"
 
-            is_blue_chip, is_fin = (code in ELECTRONICS_BLUE_CHIPS) or (code in FINANCIAL_BLUE_CHIPS), (code in FINANCIAL_BLUE_CHIPS)
+            # 宏爺穀倉賽道與防墊料評分加減分
+            granary_full_tag, granary_bonus, granary_short_badge = evaluate_granary_and_anti_trap(
+                code, yoy_val, odm_health_map, macro_withdrawal_alert
+            )
+
+            is_blue_chip = (code in CORE_WATCHLIST)
+            is_fin = (code in FINANCIAL_BLUE_CHIPS)
+            is_defense = (code in POLICY_DEFENSE_ARMOR)
             has_solid_fund = (yoy_val is not None and yoy_val > 0.0) and (cum_yoy_val is None or cum_yoy_val > 0.0)
-            if has_solid_fund:
-                short_track_tag = "🔥有基之彈(技+基雙渦輪)"
+            if "疑似墊料壓貨" in granary_full_tag:
+                short_track_tag = f"🐀疑似墊料壓貨({granary_bonus}分)"
+            elif is_defense:
+                short_track_tag = f"🛡️政策內需防彈衣(+{granary_bonus}分)"
+            elif has_solid_fund:
+                short_track_tag = f"🔥有基之彈｜{granary_short_badge}"
             elif is_blue_chip and (cum_yoy_val is None or cum_yoy_val > 0.0):
-                short_track_tag = "🏦核心權值(穩健護城河)"
+                short_track_tag = f"🏦核心權值｜{granary_short_badge}"
             else:
                 short_track_tag = "🎭純技術炒作(不看基本面)"
 
             est_eps, pe_disp, eps_entry_p, eps_target_p, val_diag = compute_eps_valuation(code, curr_p, sector, yoy_val, cum_yoy_val, pe_official, support_price=castle_iron)
 
             row_base = {
-                "代碼": code, "股名": f"{name}{cb_tag}{liq_tag}", "族群": sector, "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d,
+                "代碼": code, "股名": f"{name}{cb_tag}{liq_tag}", "族群": sector,
+                "穀倉賽道與防墊料": granary_full_tag,
+                "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d,
                 "短線屬性": short_track_tag,
                 "法人動向": inst_tag, "外資買賣(張)": f_lots, "投信買賣(張)": s_lots,
                 "預估EPS(元)": est_eps, "本益比(PE)": pe_disp, "💎EPS合理切入價": eps_entry_p, "🎯EPS目標價": eps_target_p, "估值診斷": val_diag,
@@ -1224,51 +1369,60 @@ def scan_all_stocks():
                 "400張大戶%": f"{tdcc_val:.1f}%" if tdcc_val is not None else "未揭露",
                 "單月營收YoY": yoy_str, "累計年營收YoY": cum_yoy_str
             }
-            is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
 
+            if code in (GRANARY_1_CSP_COMMON | GRANARY_2_POWER_THERMAL | GRANARY_3_EDGE_MEMORY | POLICY_DEFENSE_ARMOR | OLD_GRANARY_ODM_WATCH):
+                base_g_score = 85 + granary_bonus + (4 if curr_p >= ma20 else -3) + (3 if pdi > mdi else 0) + (3 if (f_lots > 0 or s_lots > 0) else 0)
+                list_granary_audit.append({"穀倉戰略總分": max(30, min(115, base_g_score)), **row_base})
+
+            is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
             is_above_ma20_trend = (curr_p >= ma20) and (curr_p >= ma5) and (curr_p >= ma10) and (curr_p >= ma60 or ma20 >= ma60 * 0.94)
             is_true_ma20_breakout = (curr_p >= ma20) and (curr_p >= ma5) and (curr_p >= ma10) and (prev_p < ma20) and (chg_1d >= 3.5) and (vol_ratio >= 1.25 or chg_1d >= 8.5) and (pdi > mdi)
 
-            if (is_above_ma20_trend or is_true_ma20_breakout) and (not is_heavy_dump):
+            if (is_above_ma20_trend or is_true_ma20_breakout) and (not is_heavy_dump) and ("疑似墊料壓貨" not in granary_full_tag):
                 is_overheated = (chg_3d >= 14.0) or (stk_j9 >= 93.0 and not kd_dmi_resonance and chg_1d < 8.5)
                 if (is_true_ma20_breakout and not is_overheated) or ((chg_1d >= 2.0 and (vol_ratio >= 1.20 or chg_1d >= 7.5) and kd_dmi_resonance and not is_overheated) or (chg_1d >= 2.8 and (vol_ratio >= 1.25 or chg_1d >= 7.5) and not is_overheated and (pdi > mdi) and adx >= 16.0)):
                     if kd_dmi_resonance:
-                        score, pattern = 100, f"👑 KD×DMI雙金叉共振旱地拔蔥 [{short_track_tag}]"
+                        raw_sc, pattern = 95, f"👑 KD×DMI雙金叉共振旱地拔蔥 [{granary_short_badge}]"
                     elif bb_bw <= 16.0:
-                        score, pattern = 98, f"🔥 雙鴻/奇鋐型：布林壓縮旱地拔蔥 [{short_track_tag}]"
+                        raw_sc, pattern = 93, f"🔥 雙鴻/奇鋐型：布林壓縮旱地拔蔥 [{granary_short_badge}]"
                     elif ma_tangle_pct <= 4.0:
-                        score, pattern = 97, f"🌸 瑞昱/矽創型：均線糾結旱地拔蔥 [{short_track_tag}]"
+                        raw_sc, pattern = 92, f"🌸 瑞昱/矽創型：均線糾結旱地拔蔥 [{granary_short_badge}]"
                     elif is_true_ma20_breakout:
-                        score, pattern = 96, f"🌱 階段3(3)旱地拔蔥：帶量長紅突破月線20MA [{short_track_tag}]"
+                        raw_sc, pattern = 91, f"🌱 階段3(3)旱地拔蔥：帶量長紅突破月線20MA [{granary_short_badge}]"
                     else:
-                        score, pattern = min(95, 86 + int(min(9, vol_ratio * 2.0 + chg_1d))), f"🚀 站穩月線帶量突破頸線 [{short_track_tag}]"
-                    list_tab2_launch.append({"實戰優先分": score, "名將戰法診斷": pattern, **row_base})
+                        raw_sc, pattern = min(90, 82 + int(min(8, vol_ratio * 2.0 + chg_1d))), f"🚀 站穩月線帶量突破頸線 [{granary_short_badge}]"
+                    list_tab2_launch.append({"實戰優先分": min(115, raw_sc + granary_bonus), "名將戰法診斷": pattern, **row_base})
                 elif (-3.5 <= chg_1d <= 2.2) and (chg_3d >= -6.5) and (vol_ratio <= 0.95) and (stk_j9 <= 68.0) and (pdi >= mdi):
-                    list_tab2_pullback.append({"蓄勢評分": min(99, 84 + int((1.0 - vol_ratio) * 15) + (3 if pdi > mdi else 0)), "名將戰法診斷": f"⚡ N字量縮守月線 [{short_track_tag}]", **row_base})
+                    p_sc = min(115, 84 + int((1.0 - vol_ratio) * 15) + (3 if pdi > mdi else 0) + granary_bonus)
+                    list_tab2_pullback.append({"蓄勢評分": p_sc, "名將戰法診斷": f"⚡ N字量縮守月線 [{granary_short_badge}]", **row_base})
                 elif curr_p >= ma5 >= ma10 >= ma20 and (pdi > mdi) and chg_1d >= -2.0:
-                    pattern = f"🔥 3日急拉過熱 [{short_track_tag}]" if chg_3d >= 10.5 else (f"🚀 KD鈍化惟DMI續強 [{short_track_tag}]" if (stk_j9 >= 90.0 and pdi > mdi and adx_up) else f"🛡️ 沿5/10MA穩步推升 [{short_track_tag}]")
+                    pattern = f"🔥 3日急拉過熱 [{granary_short_badge}]" if chg_3d >= 10.5 else (f"🚀 KD鈍化惟DMI續強 [{granary_short_badge}]" if (stk_j9 >= 90.0 and pdi > mdi and adx_up) else f"🛡️ 沿5/10MA穩步推升 [{granary_short_badge}]")
                     list_tab2_orbit.append({"趨勢狀態": pattern, **row_base})
 
             if is_blue_chip and (not is_heavy_dump):
-                bc_rev_ok = has_solid_fund or (yoy_val is not None and yoy_val >= 0.0) or (cum_yoy_val is not None and cum_yoy_val >= 0.0) or (is_fin and (yoy_val is None or yoy_val >= -5.0))
-                bc_tdcc_ok = (tdcc_val is None) or (tdcc_val >= 42.0)
+                bc_rev_ok = has_solid_fund or (yoy_val is not None and yoy_val >= 0.0) or (cum_yoy_val is not None and cum_yoy_val >= 0.0) or is_fin or is_defense
+                bc_tdcc_ok = (tdcc_val is None) or (tdcc_val >= 40.0)
                 fund_qual = "🔥單月+累計雙成長" if has_solid_fund else "🏦累計年增穩健"
                 if bc_rev_ok and bc_tdcc_ok and (curr_p >= ma20) and (pdi > mdi) and (chg_3d < 9.5) and (stk_j9 <= 88.0):
-                    l_score = min(100, 88 + (3 if is_fin else 0) + (4 if has_solid_fund else 0) + (4 if (tdcc_val and tdcc_val >= 65.0) else 0) + (3 if "低估鑽石" in val_diag else 0) + (2 if (f_lots > 0 and s_lots > 0) else 0))
-                    list_tab3_core_bluechip.append({"波段總分": l_score, "長線格局定性": f"👑 權值龍頭＋{fund_qual}" if kd_dmi_resonance else (f"🏦 績優金控＋{fund_qual}" if is_fin else f"✅ 長線多頭＋{fund_qual}"), **row_base})
-                elif bc_rev_ok and (curr_p < ma20) and (curr_p >= ma240 * 0.94):
-                    dip_score = min(98, 86 + (4 if chg_1d >= 0.0 else 0) + (3 if stk_j_up else 0) + (3 if has_solid_fund else 0) + (3 if "低估鑽石" in val_diag else 0) + (2 if (f_lots > 0 or s_lots > 0) else 0))
-                    dip_tag = f"🟢【權值月線下築底反彈・{fund_qual}】(上檔月線{ma20}反壓)" if (curr_p >= ma5 and chg_1d >= 0.0) else f"⏳【權值左側回測支撐・{fund_qual}】"
+                    l_score = max(40, min(115, 85 + granary_bonus + (3 if is_fin else 0) + (4 if has_solid_fund else 0) + (3 if "低估鑽石" in val_diag else 0) + (2 if (f_lots > 0 or s_lots > 0) else 0)))
+                    list_tab3_core_bluechip.append({"波段總分": l_score, "長線格局定性": f"{granary_short_badge}＋{fund_qual}", **row_base})
+                elif bc_rev_ok and (curr_p < ma20) and (curr_p >= ma240 * 0.92):
+                    dip_score = max(40, min(115, 82 + granary_bonus + (4 if chg_1d >= 0.0 else 0) + (3 if stk_j_up else 0) + (3 if has_solid_fund else 0) + (3 if "低估鑽石" in val_diag else 0) + (2 if (f_lots > 0 or s_lots > 0) else 0)))
+                    dip_tag = f"🟢【{granary_short_badge}・月線下築底反彈】(上檔月線{ma20})" if (curr_p >= ma5 and chg_1d >= 0.0) else f"⏳【{granary_short_badge}・回測支撐】"
                     list_tab3_turnaround_or_dip.append({"波段總分": dip_score, "類型與轉機標註": dip_tag, **row_base})
             elif (not is_blue_chip) and (code not in CONSTRUCTION_BLACKLIST) and (not is_heavy_dump):
                 if (yoy_val is not None and 25.0 <= yoy_val <= 400.0) and (tdcc_val is not None and tdcc_val >= 48.0) and (curr_p >= ma20 >= ma60) and (pdi > mdi) and (stk_j9 <= 85.0):
                     t_row = dict(row_base)
                     t_row["股名"] = f"🔄【轉機股】{name}{cb_tag}{liq_tag}"
                     rev_type = "雙成長爆發" if (cum_yoy_val and cum_yoy_val > 0) else "久旱破繭轉機"
-                    list_tab3_turnaround_or_dip.append({"波段總分": 92 + (4 if kd_dmi_resonance else 0) + (2 if (f_lots > 0 or s_lots > 0) else 0), "類型與轉機標註": f"🔄【{rev_type}】單月YoY{yoy_str}/累計{cum_yoy_str}＋DMI翻揚", **t_row})
+                    list_tab3_turnaround_or_dip.append({"波段總分": 92 + granary_bonus + (4 if kd_dmi_resonance else 0), "類型與轉機標註": f"🔄【{rev_type}】單月YoY{yoy_str}/累計{cum_yoy_str}＋DMI翻揚", **t_row})
         except Exception: continue
 
     st.session_state["scanned_sector_records"] = scanned_sector_records
+    st.session_state["granary_audit_df"] = pd.DataFrame(list_granary_audit).sort_values(by=["穀倉戰略總分", "今日%"], ascending=[False, False]) if list_granary_audit else pd.DataFrame()
+    st.session_state["macro_withdrawal_alert"] = macro_withdrawal_alert
+    st.session_state["tnx_now"] = tnx_now
+
     df_t1 = pd.DataFrame(list_tab2_launch).sort_values(by="實戰優先分", ascending=False) if list_tab2_launch else pd.DataFrame()
     df_t2 = pd.DataFrame(list_tab2_pullback).sort_values(by="蓄勢評分", ascending=False) if list_tab2_pullback else pd.DataFrame()
     df_t3 = pd.DataFrame(list_tab2_orbit).sort_values(by="3日%", ascending=False) if list_tab2_orbit else pd.DataFrame()
@@ -1276,25 +1430,38 @@ def scan_all_stocks():
     df_long_turn = pd.DataFrame(list_tab3_turnaround_or_dip).sort_values(by=["波段總分", "今日%"], ascending=[False, False]) if list_tab3_turnaround_or_dip else pd.DataFrame()
     return df_t1, df_t2, df_t3, df_long_bc, df_long_turn, vol_note, rt_quotes
     # ==========================================
-# 【v56.0 下半部完整程式碼：新增「台股當日熱門爆量族群雷達(預估量vs昨日量)」＋ 11/13 正2@32.57出清與力成/光寶科精準導航】
-# 直接貼在 scan_all_stocks() 的 return 那一行正下方 (上半部維持 v56.0 不動！)
+# 【v57.0 下半部完整程式碼：宏爺穀倉賽道與防墊料篩選模組 ＋ 美債10Y(^TNX)利差提款警戒 ＋ 台股當日熱門爆量族群雷達】
+# 直接貼在 scan_all_stocks() 的 return 那一行正下方 (上半部維持 v57.0 不動！)
 # ==========================================
 import base64
-
-ELECTRONICS_BLUE_CHIPS["6239"] = ("力成", "👑電子權值・FOPLP扇形封裝龍頭", "TW")
-CORE_WATCHLIST["6239"] = ("力成", "👑電子權值・FOPLP扇形封裝龍頭", "TW")
-MARGIN_EXPANSION_SET.add("6239")
 
 def clean_html(raw_html: str) -> str:
     """移除多行 HTML 字串之行首縮排與空行，防止 Streamlit Markdown 將 HTML 誤判為程式碼區塊"""
     return "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
 
 
+def prioritize_granary_and_armor_df(df: pd.DataFrame, macro_alert: bool, score_col: str) -> pd.DataFrame:
+    """當觸發『外資利差提款警戒 (^TNX>=5.0% 且 台幣>=32.5)』時，自動將『🌟新穀倉1(共通規格)』與『🛡️政策內需防彈衣』置頂排序"""
+    if df.empty or "穀倉賽道與防墊料" not in df.columns:
+        return df
+    df_c = df.copy()
+    if macro_alert:
+        df_c["_priority_tier"] = df_c["穀倉賽道與防墊料"].apply(
+            lambda s: 2 if ("新穀倉1" in str(s) or "政策內需防彈衣" in str(s)) else (1 if ("新穀倉2" in str(s) or "新穀倉3" in str(s)) else (-1 if "疑似墊料壓貨" in str(s) else 0))
+        )
+        sort_cols = ["_priority_tier"] + ([score_col] if score_col in df_c.columns else []) + (["今日%"] if "今日%" in df_c.columns else [])
+        asc_list = [False] * len(sort_cols)
+        df_c = df_c.sort_values(by=sort_cols, ascending=asc_list).drop(columns=["_priority_tier"]).reset_index(drop=True)
+    return df_c
+
+
 def map_tw_theme_cluster(code: str, name: str, sector: str, official_sec: str) -> str:
-    """將台股個股映射至 14 大實戰主流題材族群，供當日預估量增比與熱門族群雷達聚合運算"""
+    """將台股個股映射至 15 大實戰主流題材族群，供當日預估量增比與熱門族群雷達聚合運算"""
     s_all = f"{sector} {official_sec} {name}"
-    if code in ["2454", "3034", "3443", "3661", "5274", "3529", "5269", "8016"] or any(k in s_all for k in ["IC設計", "矽智財", "ASIC", "BMC", "驅動"]):
-        return "👑 IC設計與矽智財IP"
+    if code in ["1513", "1514", "8936", "9933", "6139", "1519", "1503"] or any(k in s_all for k in ["重電", "電網", "水資源", "無塵室", "統包工程"]):
+        return "🛡️ 重電電網與兆元內需基建"
+    if code in ["2454", "3034", "3443", "3661", "5274", "3529", "5269", "8016", "6515", "6223"] or any(k in s_all for k in ["IC設計", "矽智財", "ASIC", "BMC", "探針", "測試座"]):
+        return "🌟 IC設計與CSP自研晶片測試"
     if code in ["3711", "6239", "2449", "3264", "6187", "3131", "3583"] or any(k in s_all for k in ["封測", "扇形封裝", "CoWoS", "封裝", "測試"]):
         return "🔬 先進封測與CoWoS/FOPLP"
     if code in ["2330", "2303", "5347"] or "晶圓" in s_all:
@@ -1303,10 +1470,10 @@ def map_tw_theme_cluster(code: str, name: str, sector: str, official_sec: str) -
         return "⚡ 高頻CCL與伺服器PCB"
     if code in ["3017", "3324", "3653", "2059"] or any(k in s_all for k in ["散熱", "均熱片", "水冷", "導軌"]):
         return "❄️ AI水冷散熱與伺服器機構"
-    if code in ["2317", "2382", "3231", "6669", "2357", "4938"] or any(k in s_all for k in ["AI伺服器", "AI PC", "電腦及週邊"]):
-        return "🖥️ AI伺服器與PC硬體"
-    if code in ["2308", "2301"] or any(k in s_all for k in ["電源", "儲能", "BBU"]):
-        return "🔋 雲端電源與BBU儲能"
+    if code in ["2308", "2301", "3211"] or any(k in s_all for k in ["電源", "儲能", "BBU"]):
+        return "🔋 雲端電源與BBU備援電池"
+    if code in ["2317", "2382", "3231", "6669", "2357", "4938", "2356", "3706"] or any(k in s_all for k in ["AI伺服器", "AI PC", "電腦及週邊"]):
+        return "🖥️ AI伺服器與ODM組裝"
     if code in ["2345", "2379", "3558", "6285"] or any(k in s_all for k in ["網通", "通信網路", "光通訊", "衛星"]):
         return "📡 高階網通與光通訊CPO"
     if any(k in s_all for k in ["金融", "金控", "銀行", "保險", "證券"]):
@@ -1317,18 +1484,13 @@ def map_tw_theme_cluster(code: str, name: str, sector: str, official_sec: str) -
         return "🧬 生技醫療與新藥研發"
     if any(k in s_all for k in ["資訊服務", "軟體", "資安", "系統整合"]):
         return "☁️ 資訊軟體與AI資安系統"
-    if any(k in s_all for k in ["光電", "光學", "鏡頭", "面板"]):
-        return "📷 光學鏡頭與光電顯示"
-    if any(k in s_all for k in ["電機", "機械", "工具機", "重電", "電線電纜"]):
-        return "⚙️ 重電能源與機器人工具機"
+    if code in ["3008", "3406"] or any(k in s_all for k in ["光電", "光學", "鏡頭", "面板"]):
+        return "📷 光學鏡頭與邊緣AI感測"
     return "🚀 電子零組件與中小型破繭股"
 
 
 def compute_tw_hot_sectors(records: list[dict]) -> dict:
-    """
-    依據當日盤中/收盤『預估成交量 ÷ 昨日實際成交量 (昨量比 YoD)』與『族群平均漲跌幅』，
-    動態推算台股今日資金最集中的【🔥 當日熱門爆量領漲族群 Top 4】與【❄️ 當日量縮/弱勢族群】！
-    """
+    """依據當日盤中/收盤『預估成交量 ÷ 昨日實際成交量 (昨量比 YoD)』與『族群平均漲跌幅』，推算台股當日熱門爆量族群"""
     if not records:
         return {"hot_html": "", "cold_html": "", "hot_text": "暫無數據", "cold_text": "暫無數據"}
 
@@ -1339,7 +1501,6 @@ def compute_tw_hot_sectors(records: list[dict]) -> dict:
     for theme_name, grp in df_r.groupby("theme"):
         if len(grp) == 0:
             continue
-        # 計算族群「整體預估量 ÷ 昨日總量」與「個股平均昨量比」之綜合量增倍數
         tot_est_v = float(grp["est_vol"].sum())
         tot_yest_v = max(1.0, float(grp["yest_vol"].sum()))
         agg_yod = tot_est_v / tot_yest_v
@@ -1351,7 +1512,6 @@ def compute_tw_hot_sectors(records: list[dict]) -> dict:
         up_cnt = int((grp["chg_1d"] > 0).sum())
         tot_cnt = len(grp)
 
-        # 依漲幅與預估量增比綜合計算「當日族群熱度積分」
         heat_score = avg_chg * 2.2 + max_chg * 0.6 + (blended_yod - 1.0) * 6.5
 
         grp_sorted = grp.sort_values(by=["chg_1d", "yod_ratio"], ascending=[False, False])
@@ -1422,7 +1582,6 @@ def compute_tw_hot_sectors(records: list[dict]) -> dict:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def refresh_live_taifex_oi_and_pcr(base_deriv: dict) -> dict:
-    """強制校正期交所『大台/小台未平倉口數淨額 (OI)』與『選擇權 P/C Ratio』，確保 100% 即時浮動"""
     d = dict(base_deriv)
     headers = {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}
     now_tw = get_tw_now()
@@ -1509,9 +1668,7 @@ def refresh_live_taifex_oi_and_pcr(base_deriv: dict) -> dict:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_key_stocks_live_mas(rt_quotes: dict) -> dict:
-    """
-    【模組 5 城堡原則動態精算器 (v56.0 納入力成回測年線 249.5~253 支撐與挑戰 270 季線、光寶科 60分K 箱型突破導航)】
-    """
+    """動態計算力成(6239)、光寶科(2301)、0050正2(00631L)、00400A 及費城半導體(^SOX)年線位階"""
     res = {
         "6239": {
             "p": 253.5, "ma5": 245.5, "ma10": 243.0, "ma20": 248.0, "ma60": 272.8, "ma120": 290.0, "ma240": 249.5,
@@ -1532,10 +1689,17 @@ def fetch_key_stocks_live_mas(rt_quotes: dict) -> dict:
             "d2_buy_low": 195.0, "d2_buy_high": 208.0
         },
         "00631L": {"p": 32.54, "ma5": 30.10, "ma10": 30.20, "ma20": 33.50, "ma60": 35.10, "ma120": 34.00, "ma240": 25.00},
-        "00400A": {"p": 13.00, "ma5": 12.65, "ma10": 12.68, "ma20": 12.85, "ma60": 13.05, "ma120": 12.90, "ma240": 12.20}
+        "00400A": {"p": 13.00, "ma5": 12.65, "ma10": 12.68, "ma20": 12.85, "ma60": 13.05, "ma120": 12.90, "ma240": 12.20},
+        "SOX": {"p": 10500.0, "ma240": 10380.0, "above_ma240": True}
     }
     try:
-        df_k = yf.download(["6239.TW", "2301.TW", "00631L.TW", "00400A.TW"], period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
+        df_k = yf.download(["6239.TW", "2301.TW", "00631L.TW", "00400A.TW", "^SOX"], period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
+        if not df_k.empty and "^SOX" in df_k:
+            c_sox = df_k["^SOX"]["Close"].dropna().values.astype(float)
+            if len(c_sox) >= 60:
+                sox_p = round(float(c_sox[-1]), 1)
+                sox_240 = round(float(np.mean(c_sox[-240:])), 1) if len(c_sox) >= 240 else round(float(np.mean(c_sox)), 1)
+                res["SOX"] = {"p": sox_p, "ma240": sox_240, "above_ma240": bool(sox_p >= sox_240)}
         for code_s in ["6239", "2301", "00631L", "00400A"]:
             tkr = f"{code_s}.TW"
             if not df_k.empty and tkr in df_k:
@@ -1563,7 +1727,6 @@ def fetch_key_stocks_live_mas(rt_quotes: dict) -> dict:
                     res[code_s]["j_val"] = j_stk
 
                     if code_s == "6239":
-                        # 力成短線回測年線(240MA)/月線(20MA)支撐區 (約 248~253元) 與挑戰季線 (~270元)
                         ma_sup_lo = round(min(res["6239"]["ma20"], res["6239"]["ma240"], 249.5), 1)
                         ma_sup_hi = round(max(min(curr_p, 253.0), ma_sup_lo + 2.5), 1)
                         tk_lo = round(max(268.0, min(res["6239"]["ma60"] - 3.0, 270.0)), 1)
@@ -1622,6 +1785,7 @@ def apply_macro_circuit_breaker(
     fx_now: float,
     fx_ma5: float,
     fx_chg_ntd: float,
+    tnx_val: float = 5.13,
     above_ma5: bool = False
 ) -> tuple[int, str, str, bool]:
     score, penalties, is_capped = raw_score, [], False
@@ -1655,6 +1819,10 @@ def apply_macro_circuit_breaker(
         score -= 5
         penalties.append("台幣續貶破5MA熱錢匯出 (-5分)")
 
+    if tnx_val >= 5.0 and fx_now >= 32.50:
+        score -= 3
+        penalties.append(f"美債10Y殖利率 {tnx_val:.2f}%>5%且台幣>32.5利差提款警戒 (-3分)")
+
     if taiex_price < ma240:
         if score > 60: is_capped = True
         score = min(score, 60)
@@ -1670,7 +1838,7 @@ def apply_macro_circuit_breaker(
             status_tag = "⚠️ 半年線下築底測試格局（半年線僅作警戒，靜待站穩日5MA轉攻）"
     elif taiex_price < ma60:
         score = min(score, 85)
-        status_tag = "🛡️ 站回半年線、季線下震盪收復格局（選股不選市、鎖定有基之彈）"
+        status_tag = "🛡️ 站回半年線、季線下震盪收復格局（選股不選市、鎖定新穀倉與防彈衣）"
     else:
         status_tag = "🚀 站穩季線多頭推進格局（順勢偏多操作）"
 
@@ -1762,6 +1930,7 @@ def fetch_vix_and_panic_forecast(twii_now, ma5, ma10, ma20, ma60, ma120, ma240, 
         "vix_now": vix_now, "vix_chg_pct": vix_chg_pct, "vix_ma5": vix_ma5, "vix_ma20": vix_ma20,
         "vix_status": vix_status, "vix_color": vix_color,
         "us_session_tag": us_data["session_tag"],
+        "tnx_val": us_data["tnx_val"], "tnx_chg": us_data["tnx_chg"],
         "sox_chg": sox_chg, "tsm_chg": tsm_chg, "nvda_chg": nvda_chg,
         "tsm_ext_str": tsm_ext_str, "nvda_ext_str": nvda_ext_str,
         "nq_chg": us_data["nq_chg"],
@@ -1778,13 +1947,6 @@ def pin_code_name_index(df):
     if df.empty:
         return df
     df_c = df.copy()
-    if "代碼" in df_c.columns:
-        is_core = df_c["代碼"].astype(str).isin(CORE_WATCHLIST.keys())
-        if "短線屬性" in df_c.columns:
-            df_c.loc[is_core & df_c["短線屬性"].astype(str).str.contains("純技術"), "短線屬性"] = "🏦核心權值(穩健護城河)"
-        for diag_col in ["名將戰法診斷", "趨勢狀態"]:
-            if diag_col in df_c.columns:
-                df_c.loc[is_core, diag_col] = df_c.loc[is_core, diag_col].astype(str).str.replace("🎭純技術炒作(不看基本面)", "🏦核心權值(穩健護城河)", regex=False)
     name_col = "股名" if "股名" in df_c.columns else ("公司名稱" if "公司名稱" in df_c.columns else None)
     if "代碼" in df_c.columns and name_col:
         return df_c.set_index(["代碼", name_col])
@@ -1792,9 +1954,7 @@ def pin_code_name_index(df):
 
 
 def build_dynamic_triangle_blueprint_html(twii_now, twii_high, ma5, ma10, ma20, ma60, ma120, ma240, j_now, k60_j, k_mas):
-    """
-    【v56.0 三層物理分離式 SVG 架構 ＋ 11/13 正2@32.57已獲利出清 ＋ 力成回測年線(249.5~253)後挑戰270季線 ＋ 光寶科60分K箱型突破導航】
-    """
+    """【v57.0 三層物理分離式 SVG 架構 ＋ 11/13 正2@32.57已獲利出清 ＋ 力成/光寶科與宏爺穀倉導航】"""
     m6239 = k_mas["6239"]
     m2301 = k_mas["2301"]
     p_6239 = m6239["p"]
@@ -1926,14 +2086,14 @@ def build_dynamic_triangle_blueprint_html(twii_now, twii_high, ma5, ma10, ma20, 
 <div style="text-align:center; font-size:15.5px; font-weight:800; color:#00e676; background:rgba(0,230,118,0.12); padding:8px 12px; border-radius:8px; margin-bottom:12px; border:1px solid rgba(0,230,118,0.4); line-height:1.55;">
 {curr_stage_title}<br>
 📡 <b>最新核心持倉與技術導航</b>：
-<b>力成(6239) = {p_6239:.1f}元</b> (持1張@253｜<span style="color:#ffd54f;">日J={m6239['j_val']:.0f}偏高，短線觀察回測年線/月線 {pti_ma240_sup}元 換手守穩再攻季線 {pti_b_take}元！</span>) &nbsp;｜&nbsp;
-<b>光寶科(2301) = {p_2301:.1f}元</b> (持1張@216｜<span style="color:#ffd54f;">60分K於 228~234.5元 箱型盤整待下週月線扣低突破攻 {lite_b_take}元！</span>) &nbsp;｜&nbsp;
-<b>0050正2 = {p_2x:.2f}元</b> (<span style="color:#00e676;">11/13已於@32.57全數獲利出清✅ 空手等回測5MA {m5_2x:.2f}元</span>) &nbsp;｜&nbsp;
+<b>力成(6239·📱新穀倉3) = {p_6239:.1f}元</b> (持1張@253｜<span style="color:#ffd54f;">日J={m6239['j_val']:.0f}偏高，短線觀察回測年線/月線 {pti_ma240_sup}元 換手守穩再攻季線 {pti_b_take}元！</span>) &nbsp;｜&nbsp;
+<b>光寶科(2301·⚡新穀倉2) = {p_2301:.1f}元</b> (持1張@216｜<span style="color:#ffd54f;">60分K於 228~234.5元 箱型盤整待下週月線扣低突破攻 {lite_b_take}元！</span>) &nbsp;｜&nbsp;
+<b>0050正2 = {p_2x:.2f}元</b> (<span style="color:#00e676;">11/13已於@32.57全數獲利出清✅ 空手避開月線反壓與利差提款</span>) &nbsp;｜&nbsp;
 <b>00400A = {p_00400a:.2f}元</b> (持31張｜<span style="color:#ffd54f;">等拉回 12.40~12.60元 買區</span>)
 </div>
 <img src="data:image/svg+xml;base64,{b64_svg}" style="width:100%; height:auto; display:block; border-radius:10px; margin-bottom:14px;" />
 <div style="font-size:17px; font-weight:900; color:#fcd34d; margin: 6px 0 8px 0;">
-一、【FOPLP扇形封裝(力成6239) ＆ 800VDC雲端電源(光寶科2301) ＋ 正2波段階段】（廣達@291.5、正2@32.57 均已獲利出清✅）
+一、【新穀倉雙龍頭：FOPLP扇形封裝(力成6239) ＆ 800VDC雲端電源(光寶科2301) ＋ 正2波段階段】（舊穀倉廣達@291.5、正2@32.57 均已獲利出清✅）
 </div>
 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-bottom:14px;">
 <div style="background:linear-gradient(135deg,#7f1d1d,#991b1b); padding:10px 12px; border-radius:8px; border:{bdr_s1}; font-size:14px; line-height:1.5;">
@@ -1944,7 +2104,7 @@ def build_dynamic_triangle_blueprint_html(twii_now, twii_high, ma5, ma10, ma20, 
 </div>
 <div style="background:linear-gradient(135deg,#1e3a8a,#1d4ed8); padding:10px 12px; border-radius:8px; border:{bdr_s2}; font-size:14px; line-height:1.5;">
 <b style="color:#fef08a; font-size:15px;">⏳ 節點C：12月中~1月中右腳 (41,500~42,000)</b><br>
-• <b>雙龍頭波段黃金買點！</b><br>
+• <b>新穀倉雙龍頭波段黃金買點！</b><br>
 • <b>力成(6239)建議進場價</b>：回測前波起漲底 <b>{pti_c_buy}元</b> 買進第 2、3 張重裝倉 (迎接2027 H1 FOPLP試產)<br>
 • <b>光寶科(2301)建議進場價</b>：回測 <b>{lite_c_buy}元</b> 買進第 2、3 張
 </div>
@@ -1993,13 +2153,13 @@ def build_dynamic_triangle_blueprint_html(twii_now, twii_high, ma5, ma10, ma20, 
 
 
 # ==========================================
-# Streamlit 戰情室主介面 (v56.0 台股當日熱門爆量族群雷達 ＋ 11/13 最新持倉導航版)
+# Streamlit 戰情室主介面 (v57.0 宏爺穀倉賽道與防墊料篩選模組 ＋ 美債10Y利差提款警戒 ＋ 熱門爆量族群雷達)
 # ==========================================
 now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🧭 台股每日戰情室 v56.0 (台股當日熱門爆量族群雷達 ＋ 大三角藍圖 ＋ 力成6239/光寶科2301 技術導航版)")
+st.markdown("## 🧭 台股每日戰情室 v57.0 (宏爺三大新穀倉＆防墊料模組 ＋ 美債10Y利差雷達 ＋ 當日熱門爆量族群)")
 
 btn_col1, btn_col2, btn_col3 = st.columns([2, 2, 3])
-if btn_col1.button("⚡ 秒速刷新盤中即時報價、熱門族群量增比與藍圖定位", use_container_width=True):
+if btn_col1.button("⚡ 秒速刷新盤中即時報價、熱門族群量增比與穀倉防墊料雷達", use_container_width=True):
     fetch_mis_realtime_batch.clear()
     fetch_us_sectors_and_leaders.clear()
     fetch_vix_and_panic_forecast.clear()
@@ -2008,7 +2168,7 @@ if btn_col2.button("🔄 立即重抓 14:00 後期交所、三大法人與最新
     st.cache_data.clear()
 auto_refresh = btn_col3.checkbox("⏱️ 開啟盤中每 20 秒自動刷新即時報價", value=False)
 
-with st.spinner("📡 正在同步台股當日熱門爆量族群(預估量vs昨日量)、三層零重疊作戰藍圖、力成/光寶科技術導航與 EPS SOP v2.0..."):
+with st.spinner("📡 正在同步宏爺三大新穀倉与防墊料財報濾網、美債10Y(^TNX)利差提款雷達、台股熱門爆量族群與 EPS SOP v2.0..."):
     df_launch, df_pullback, df_orbit, df_long_bc, df_long_turn, vol_note, rt_quotes = scan_all_stocks()
     fleet = fetch_and_analyze_fleet(rt_quotes)
     price_dict_all, tdcc_dict_all, _, _ = fetch_official_market_data()
@@ -2017,12 +2177,12 @@ with st.spinner("📡 正在同步台股當日熱門爆量族群(預估量vs昨�
         df_all_rev["400張大戶%"] = df_all_rev["代碼"].map(lambda c: f"{tdcc_dict_all[c]:.1f}%" if c in tdcc_dict_all else "未揭露")
         df_all_rev["_tdcc_num"] = df_all_rev["代碼"].map(lambda c: float(tdcc_dict_all.get(c, 0.0)))
 
-# 計算台股當日熱門爆量族群與領頭羊指標股
 tw_hot_sec_info = compute_tw_hot_sectors(st.session_state.get("scanned_sector_records", []))
+df_granary_audit = st.session_state.get("granary_audit_df", pd.DataFrame())
 
 deriv = refresh_live_taifex_oi_and_pcr(fleet["deriv"])
 k_mas = fetch_key_stocks_live_mas(rt_quotes)
-m6239, m2301 = k_mas["6239"], k_mas["2301"]
+m6239, m2301, sox_ma_info = k_mas["6239"], k_mas["2301"], k_mas.get("SOX", {"p": 10500.0, "ma240": 10380.0, "above_ma240": True})
 p_6239, p_2301, p_2x, p_00400a = m6239["p"], m2301["p"], k_mas["00631L"]["p"], k_mas["00400A"]["p"]
 
 pti_ma240_sup_s = f"{m6239['pullback_ma240_low']:.1f}~{m6239['pullback_ma240_high']:.1f}"
@@ -2058,7 +2218,11 @@ tf = fetch_vix_and_panic_forecast(
     in_maint_pct, in_pcr, retail_mtx_chg_v, in_warrant_yi, est_short_cost, target_cover_1, target_cover_2
 )
 
-st.caption(f"🕒 台灣時間：{now_str} ｜ 報價：{fleet['quote_src']} ｜ {vol_note} ｜ {tf['us_session_tag']} ｜ 台幣：{fx_now:.3f} ({fx_cents_chg:+.1f}分)")
+tnx_val = tf.get("tnx_val", 5.13)
+tnx_chg = tf.get("tnx_chg", +0.85)
+macro_withdrawal_alert = bool(tnx_val >= 5.0 and fx_now >= 32.50)
+
+st.caption(f"🕒 台灣時間：{now_str} ｜ 報價：{fleet['quote_src']} ｜ {vol_note} ｜ 美債10Y(^TNX)：{tnx_val:.2f}% ({tnx_chg:+.2f}%) ｜ 台幣：{fx_now:.3f} ({fx_cents_chg:+.1f}分)")
 
 s1_maint = 25 if in_maint_pct <= 135.0 else (22 if in_maint_pct <= 145.0 else (16 if in_maint_pct <= 152.0 else (12 if in_maint_pct <= 165.0 else 5)))
 s1_concl = f"📌 結論：底部斷頭清洗完成、回升至常態區 ({in_maint_pct:.1f}%)" if 145.0 < in_maint_pct <= 165.0 else (f"📌 結論：進入落底甜美區 ({in_maint_pct:.1f}%)" if in_maint_pct <= 145.0 else f"📌 結論：融資水位偏高 ({in_maint_pct:.1f}%)")
@@ -2094,27 +2258,33 @@ s5_concl = f"📌 結論：守穩 5MA({twii_ma5:,.0f}) 與 10MA({twii_ma10:,.0f}
 raw_score_5d = s1_maint + s2_fut + s3_opt_war + s4_k60 + s5_space
 score_5d, grade_str, circuit_trace_str, is_circuit_capped = apply_macro_circuit_breaker(
     raw_score_5d, twii_now, twii_ma60, twii_ma120, twii_ma240, ma120_is_rising,
-    in_pcr, in_maint_pct, fx_now, fx_ma5, fx_chg_ntd, above_ma5=is_above_ma5
+    in_pcr, in_maint_pct, fx_now, fx_ma5, fx_chg_ntd, tnx_val=tnx_val, above_ma5=is_above_ma5
 )
 
-fx_score_adj_str = "+5分 (升破5MA獎勵)" if (fx_now <= fx_ma5 and fx_chg_ntd < 0) else ("-5分 (貶破5MA扣分)" if (fx_now > fx_ma5 and fx_chg_ntd >= 0.04) else "0分 (守5MA內中性)")
-fx_cmp_sym = "<=" if fx_now <= fx_ma5 else ">"
-if fx_now <= fx_ma5 and fx_chg_ntd < 0:
-    fx_concl = f"📌 結論：台幣止貶轉升破5MA ({fx_now:.3f} <= {fx_ma5:.3f}) ➔ 外資熱錢回流！"
-elif fx_now <= fx_ma5:
-    fx_concl = f"📌 結論：台幣守穩 5MA 轉折線內 ({fx_now:.3f} <= {fx_ma5:.3f}) ➔ 資金面中性偏穩"
+fx_score_adj_str = "+5分 (升破5MA獎勵)" if (fx_now <= fx_ma5 and fx_chg_ntd < 0) else ("-5分 (貶破5MA扣分)" if (fx_now > fx_ma5 and fx_chg_ntd >= 0.04) else "0分 (守5MA內)")
+if macro_withdrawal_alert:
+    sox_ma240_str = f"費半({sox_ma_info['p']:,.0f})守年線({sox_ma_info['ma240']:,.0f})保衛戰" if sox_ma_info.get("above_ma240") else f"費半({sox_ma_info['p']:,.0f})跌破年線({sox_ma_info['ma240']:,.0f})"
+    fx_concl = f"🚨 觸發【外資利差提款警戒】(^TNX {tnx_val:.2f}%>5% ＋ 台幣 {fx_now:.3f}>32.5)"
+    fleet_2x_macro_tip = f"🚨 <b>0050正2 子艦隊利差警戒提示</b>：大盤受月線({twii_ma20:,.0f})反壓與美台利差提款(^TNX={tnx_val:.2f}%、台幣={fx_now:.3f})影響，<b>0050正2 暫停追高（您已於 @32.57 完美出清✅）</b>，待 {sox_ma240_str} 站穩與融資(5,334億)清洗後再進場！個股列表已自動置頂<b>【🌟新穀倉1(共通規格)】</b>與<b>【🛡️政策內需防彈衣】</b>！"
 else:
-    fx_concl = f"📌 結論：台幣貶破 5MA ({fx_now:.3f} > {fx_ma5:.3f}) ➔ 短線外資匯出引發震盪"
+    fx_concl = f"🟢 台幣 {fx_now:.3f}元 ({'<=5MA轉升' if fx_now <= fx_ma5 else '守穩'})｜美債10Y {tnx_val:.2f}%"
+    fleet_2x_macro_tip = f"✅ <b>0050正2 子艦隊提示</b>：您已於 11/13 早盤 @32.57 獲利出清最後1張正2✅，目前空手避開上檔月線({twii_ma20:,.0f})反壓震盪。"
 
 if twii_now >= twii_ma20 and score_5d >= 70:
     water_level_pct, water_level_note = "70% ～ 80%", "月線上多頭推進・積極順勢操作"
 elif is_above_ma5 and score_5d >= 60:
-    water_level_pct, water_level_note = "50% ～ 60%", f"11/13已將最後1張正2@32.57獲利出清✅ 力成(6239)待回測年線{pti_ma240_sup_s}元守穩攻270季線，光寶科(2301)待60分K盤整突破攻{liteon_res_s}元！"
+    water_level_pct, water_level_note = "50% ～ 60%", f"正2已於@32.57獲利出清✅ 聚焦新穀倉(力成回測年線{pti_ma240_sup_s}攻270、光寶科60分K盤整突破攻{liteon_res_s})與內需防彈衣！"
 else:
-    water_level_pct, water_level_note = "30% ～ 40%", "回測支撐防禦・分批低接力成(6239)、光寶科(2301)與00400A"
+    water_level_pct, water_level_note = "30% ～ 40%", "回測支撐防禦・鎖定🌟新穀倉1共通規格與🛡️政策內需防彈衣"
+
+# 當觸發外資利差提款警戒時，將各表自動置頂「🌟新穀倉1」與「🛡️政策內需防彈衣」
+df_launch = prioritize_granary_and_armor_df(df_launch, macro_withdrawal_alert, "實戰優先分")
+df_pullback = prioritize_granary_and_armor_df(df_pullback, macro_withdrawal_alert, "蓄勢評分")
+df_long_bc = prioritize_granary_and_armor_df(df_long_bc, macro_withdrawal_alert, "波段總分")
+df_long_turn = prioritize_granary_and_armor_df(df_long_turn, macro_withdrawal_alert, "波段總分")
 
 if not df_launch.empty and "短線屬性" in df_launch.columns:
-    df_launch_fund = df_launch[df_launch["短線屬性"].str.contains("有基之彈|核心權值", na=False)].copy()
+    df_launch_fund = df_launch[df_launch["短線屬性"].str.contains("有基之彈|核心權值|政策內需", na=False)].copy()
     df_launch_pure = df_launch[df_launch["短線屬性"].str.contains("純技術炒作", na=False)].copy()
 else:
     df_launch_fund, df_launch_pure = pd.DataFrame(), pd.DataFrame()
@@ -2126,6 +2296,7 @@ def fmt_stock_full_detail(r):
     tgt_s = f"{r['🎯EPS目標價']:.2f}" if pd.notna(r.get("🎯EPS目標價")) else "-"
     return (
         f"【{r['代碼']} {r.get('股名', r.get('公司名稱', ''))}】"
+        f"穀倉定性={r.get('穀倉賽道與防墊料', '-')} | "
         f"現價={r['現價']}({r['今日%']:+.2f}%/3日{r.get('3日%', 0):+.2f}%) | "
         f"法人={r.get('法人動向', '-')}[外資{r.get('外資買賣(張)', 0):+,}張/投信{r.get('投信買賣(張)', 0):+,}張] | "
         f"昨量比={r.get('昨日量比', '-')}x/5MA量比={r.get('5MA量比', '-')}(預估{r.get('預估量(張)', '-')}張) | "
@@ -2140,50 +2311,31 @@ def build_complete_ai_snapshot():
     up_sec_clean = re.sub(r"<[^>]+>", "", " ； ".join(tf["top_up_sectors"]))
     dn_sec_clean = re.sub(r"<[^>]+>", "", " ； ".join(tf["bot_dn_sectors"]))
     lines = [
-        f"【⚡ 淘金客 v23.0 雙核 20 模組強制聯網深度健檢指令】（{now_str}）：請針對以下戰情室總結數據包，優先自主聯網查證美股/台指夜盤、重點個股之主力分點籌碼、資券借變化、CB可轉債轉換價與最新法說會催化劑，並結合『大三角收斂四大波浪節點(A~D2)』與『淘金客 EPS 預估 SOP v2.0（時序收斂＋三率乘數T）』給出具體買賣點位與實戰行動指令！",
-        f"1. [大盤指數、多空方向與總評分]：大盤現價={twii_now:,.1f}點 (今日{fleet['twii_chg_pct']:+.2f}% | 開盤{twii_open:,.0f}/高{fleet['twii_high']:,.0f}/低{fleet['twii_low']:,.0f}/昨收{twii_prev_c:,.0f}) | 大盤多空總評分={score_5d}/100分 ({grade_str}) | 股市水庫建議水位={water_level_pct}({water_level_note}) | 核心持倉與技術導航：力成(6239)={p_6239:.1f}元(持1張@253，日J={m6239['j_val']:.0f}偏高，短線觀察回測年線/月線{pti_ma240_sup_s}元換手有守再攻季線{pti_b_take_s}元，節點C黃金買點{pti_c_buy_s}元)、光寶科(2301)={p_2301:.1f}元(持1張@216，60分K於228~234.5元箱型盤整守10MA {m2301['ma10']:.1f}元，待下週月線扣低突破攻{liteon_res_s}元，節點C加碼{liteon_c_buy_s}元)、0050正2={p_2x:.2f}元(11/13已於@32.57獲利出清✅目前0張空手，待回測5MA {k_mas['00631L']['ma5']:.2f}元再評估)、00400A={p_00400a:.2f}元(持31張@14.4，第一階進場價12.40~12.60元)",
+        f"【⚡ 淘金客 v23.0 × 宏爺穀倉防墊料模組 強制聯網深度健檢指令】（{now_str}）：請針對以下戰情室總結數據包，優先自主聯網查證美股/台指夜盤、重點個股之主力分點籌碼、資券借變化、CB可轉債轉換價與最新法說會催化劑，並結合『宏爺三大新穀倉 vs 政策內需防彈衣 vs 防墊料濾網』、『大三角收斂四大波浪節點(A~D2)』與『淘金客 EPS 預估 SOP v2.0』給出具體買賣點位與實戰行動指令！",
+        f"1. [大盤指數、多空方向與美債利差警戒]：大盤現價={twii_now:,.1f}點 (今日{fleet['twii_chg_pct']:+.2f}% | 開盤{twii_open:,.0f}/高{fleet['twii_high']:,.0f}/低{fleet['twii_low']:,.0f}/昨收{twii_prev_c:,.0f}) | 大盤多空總評分={score_5d}/100分 ({grade_str}) | 美債10Y殖利率(^TNX)={tnx_val:.2f}%({tnx_chg:+.2f}%) & 台幣={fx_now:.3f}元 ➔ {'🚨已觸發外資利差提款警戒(自動置頂新穀倉1與政策防彈衣)' if macro_withdrawal_alert else '✅未觸發極端利差警戒'} | 核心持倉：力成(6239·📱新穀倉3)={p_6239:.1f}元(持1張@253，回測年線{pti_ma240_sup_s}元換手後挑戰季線{pti_b_take_s}元)、光寶科(2301·⚡新穀倉2)={p_2301:.1f}元(持1張@216，60分K盤整待下週突破攻{liteon_res_s}元)、0050正2={p_2x:.2f}元(11/13已於@32.57獲利出清✅目前0張空手)、00400A={p_00400a:.2f}元(持31張@14.4)",
         f"2. [🔥台股當日熱門爆量領漲族群(預估量vs昨日量)]：熱門領漲族群={tw_hot_sec_info['hot_text']} | 量縮/調節族群={tw_hot_sec_info['cold_text']}",
         f"3. [八大評估指標明細與個別評分]："
         f"(1)純個股融資維持率={in_maint_pct:.1f}% [得分:{s1_maint}/25分] | "
         f"(2)大小台期貨：大台外資={in_fini_chg:+,}口(未平倉{in_fini_oi:+,})/大台投信={sitc_tx_chg_v:+,}口(未平倉{in_sitc_oi:+,})/大台實質空單={real_directional_fini_oi:+,}口、小台外資={fini_mtx_chg_v:+,}口/小台散戶={retail_mtx_chg_v:+,}口、外資佈空成本={est_short_cost:,.0f}點(滿足點{target_cover_2:,.0f}點) [得分:{s2_fut}/25分] | "
         f"(3)選擇權PCR={in_pcr:.1f}% [得分:{s3_pcr}/12分] ＋ 自營商權證避險={in_warrant_yi:+.2f}億 [得分:{s3_war}/8分] (期權合計:{s3_opt_war}/20分) | "
         f"(4)60分K與日5MA微觀扳機：60分5MA={fleet['k60_ma5']:,.0f}/60分J={k60_j:.1f} [得分:{s4_k60}/15分] | "
-        f"(5)均線空間與日KDJ彈力：5MA={twii_ma5:,.0f}/10MA={twii_ma10:,.0f}/20MA月線={twii_ma20:,.0f}(乖離{fleet['bias_20']:+.2f}%)/60MA季線={twii_ma60:,.0f}/120MA半年線={twii_ma120:,.0f}/240MA年線={twii_ma240:,.0f}、日K={fleet['k9']}/D={fleet['d9']}/J={j_now:.1f}({j_trend_str})、日DMI(+DI={fleet['pdi_d']}/-DI={fleet['mdi_d']}/ADX={fleet['adx_d']}) [得分:{s5_space}/15分] | "
-        f"(6)新台幣匯率={fx_now:.3f}元 (5MA={fx_ma5:.3f}/20MA={fx_ma20:.3f}) [加減分:{fx_score_adj_str}] | "
-        f"(7)美股({tf['us_session_tag']})VIX與板塊連動：VIX={tf['vix_now']:.2f}({tf['vix_chg_pct']:+.2f}%)、費半SOX={tf['sox_chg']:+.2f}%、台積電ADR={tf['tsm_chg']:+.2f}%{tf['tsm_ext_str']}、輝達NVDA={tf['nvda_chg']:+.2f}%{tf['nvda_ext_str']} | 美股領漲：{up_sec_clean} | 美股領跌：{dn_sec_clean} | "
+        f"(5)均線空間與日KDJ彈力：5MA={twii_ma5:,.0f}/10MA={twii_ma10:,.0f}/20MA月線={twii_ma20:,.0f}(乖離{fleet['bias_20']:+.2f}%)/60MA季線={twii_ma60:,.0f}/120MA半年線={twii_ma120:,.0f}/240MA年線={twii_ma240:,.0f}、日K={fleet['k9']}/D={fleet['d9']}/J={j_now:.1f}({j_trend_str}) [得分:{s5_space}/15分] | "
+        f"(6)美債10Y殖利率={tnx_val:.2f}% ＋ 新台幣匯率={fx_now:.3f}元 (5MA={fx_ma5:.3f}) [加減分:{fx_score_adj_str}] | "
+        f"(7)美股({tf['us_session_tag']})VIX與板塊連動：VIX={tf['vix_now']:.2f}({tf['vix_chg_pct']:+.2f}%)、費半SOX={tf['sox_chg']:+.2f}%(年線{sox_ma_info['ma240']:,.0f})、台積電ADR={tf['tsm_chg']:+.2f}%{tf['tsm_ext_str']}、輝達NVDA={tf['nvda_chg']:+.2f}%{tf['nvda_ext_str']} | 美股領漲：{up_sec_clean} | "
         f"(8)台股散戶綜合恐慌指數={tf['tw_panic_idx']}/100分 ({tf['panic_label']})"
     ]
-    lines.append("4. [短線表1-A：站穩月線且DMI多方之有基之彈旱地拔蔥榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_launch_fund.head(8).iterrows()]) if not df_launch_fund.empty else "今日暫無符合標的"))
-    lines.append("5. [短線表1-B：純看技術面旱地拔蔥榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_launch_pure.head(8).iterrows()]) if not df_launch_pure.empty else "今日暫無符合標的"))
-    lines.append("6. [短線表2：N字洗盤量縮守月線榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_pullback.head(8).iterrows()]) if not df_pullback.empty else "今日暫無符合標的"))
-    lines.append("7. [短線表3：上升軌道推升與急拉警戒榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_orbit.head(8).iterrows()]) if not df_orbit.empty else "今日暫無符合標的"))
-    lines.append("8. [長線表3-A：電子與金融權值核心多頭榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_long_bc.head(10).iterrows()]) if not df_long_bc.empty else "今日暫無站上月線之權值股"))
-    lines.append("9. [長線表3-B：權值股回測支撐買點＆轉機股榜(含EPS SOP v2.0鑽石切入價)]：" + (" ； ".join([f"{r.get('類型與轉機標註', '')} " + fmt_stock_full_detail(r) for _, r in df_long_turn.head(12).iterrows()]) if not df_long_turn.empty else "今日暫無符合標的"))
-    if not df_all_rev.empty:
-        df_turn_top = df_all_rev[
-            df_all_rev["轉機與成長型態"].str.contains("久旱逢甘霖|低迷翻揚", na=False)
-            & (~df_all_rev["備註AI真偽鑑別"].str.contains("🏗️|⚠️", na=False))
-            & (df_all_rev["當月營收(億)"].fillna(0) >= 0.20)
-        ].head(15)
-        if not df_turn_top.empty:
-            t_list = []
-            for _, r in df_turn_top.iterrows():
-                eps_u = f"{r['預估EPS(元)']:.2f}元" if pd.notna(r.get("預估EPS(元)")) else "待轉盈"
-                pe_u = f"{r['本益比(PE)']:.1f}x" if pd.notna(r.get("本益比(PE)")) else "無PE"
-                t_list.append(
-                    f"【{r['代碼']}{r['公司名稱']}({r['資料年月']})】現價={r['現價']}({r['今日%']:+}%) | {r['轉機與成長型態']} | "
-                    f"法人={r.get('法人動向', '-')} | 備註真偽:{r.get('備註AI真偽鑑別', '-')} | CB:{r.get('CB可轉債', '-')} | "
-                    f"單月YoY={r['年增YoY%']:+}%/累計年YoY={r['累計YoY%']:+}% | "
-                    f"EPS估值(SOPv2.0):預估EPS={eps_u}/PE={pe_u}/💎切入價={r['💎EPS合理切入價']}({r['估值診斷']}) | "
-                    f"大戶={r.get('400張大戶%', '-')} | 備註原文:{r['財報營收備註說明'][:45]}"
-                )
-            lines.append("10. [分頁四：久旱逢甘霖(已排除營建與一次性認列＋含三大法人買賣超＋EPS SOP v2.0)真轉機前15強]：" + " ； ".join(t_list))
+    if not df_granary_audit.empty:
+        lines.append("4. [🌾宏爺三大新穀倉 vs 🛡️政策內需防彈衣 vs 🐀舊穀倉防墊料體檢前15強]：" + " ； ".join([fmt_stock_full_detail(r) for _, r in df_granary_audit.head(15).iterrows()]))
+    lines.append("5. [短線表1-A：站穩月線且DMI多方之有基之彈旱地拔蔥榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_launch_fund.head(8).iterrows()]) if not df_launch_fund.empty else "今日暫無符合標的"))
+    lines.append("6. [長線表3-A：核心多頭波段榜]：" + (" ； ".join([fmt_stock_full_detail(r) for _, r in df_long_bc.head(10).iterrows()]) if not df_long_bc.empty else "今日暫無站上月線之權值股"))
+    lines.append("7. [長線表3-B：回測支撐買點＆轉機股榜(含EPS SOP v2.0鑽石切入價)]：" + (" ； ".join([f"{r.get('類型與轉機標註', '')} " + fmt_stock_full_detail(r) for _, r in df_long_turn.head(12).iterrows()]) if not df_long_turn.empty else "今日暫無符合標的"))
     return "\n".join(lines)
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🧭 大盤多空儀表板",
     "⚡ 短線旱地拔蔥榜",
     "🏛️ 長線鑽石波段榜",
+    "🌾 穀倉與防墊料專區",
     "📈 上市櫃月營收快篩"
 ])
 
@@ -2200,6 +2352,7 @@ with tab1:
     up_sec_cards = format_sector_bold_html(tf["top_up_sectors"], is_up=True)
     dn_sec_cards = format_sector_bold_html(tf["bot_dn_sectors"], is_up=False)
     war_note_txt = "正值代表認購大戶進場點火" if in_warrant_yi >= 0 else "負值逾35億代表散戶認購停損宣洩、浮額洗淨具反彈契機"
+    tnx_border_col = "#ff4d4f" if macro_withdrawal_alert else "#ffd54f"
 
     master_hero_html = f"""
 <div class="{hero_box_class}">
@@ -2226,7 +2379,7 @@ with tab1:
 <div class="war-dim-item" style="border-left: 5px solid {tf['vix_color']};">
 <span class="war-dim-concl" style="font-size:17.5px;">2. 🌎 美股 VIX ＆ 費半/台積ADR與領漲領跌板塊：{tf['us_session_tag']}</span>
 <div style="font-size:15px; margin-bottom:6px;">
-• <b>核心結論</b>：<b style="color:{tf['vix_color']};">{tf['vix_status']}</b> ｜ <b>費半(SOX)</b>：<b style="color:{sox_c};">{tf['sox_chg']:+.2f}%</b> ｜ <b>台積ADR</b>：<b style="color:{tsm_c};">{tf['tsm_chg']:+.2f}%{tf['tsm_ext_str']}</b> ｜ <b>輝達</b>：<b style="color:{nvda_c};">{tf['nvda_chg']:+.2f}%{tf['nvda_ext_str']}</b>
+• <b>核心結論</b>：<b style="color:{tf['vix_color']};">{tf['vix_status']}</b> ｜ <b>費半(SOX)</b>：<b style="color:{sox_c};">{tf['sox_chg']:+.2f}%</b>(年線{sox_ma_info['ma240']:,.0f}) ｜ <b>台積ADR</b>：<b style="color:{tsm_c};">{tf['tsm_chg']:+.2f}%{tf['tsm_ext_str']}</b> ｜ <b>輝達</b>：<b style="color:{nvda_c};">{tf['nvda_chg']:+.2f}%{tf['nvda_ext_str']}</b>
 </div>
 {up_sec_cards}
 {dn_sec_cards}
@@ -2239,40 +2392,40 @@ with tab1:
 </div>
 <div class="war-dim-item" style="border-left: 5px solid #00e676;">
 <span class="war-dim-concl">4. 🛡️ 純個股融資維持率（得分：{s1_maint} / 25 分）｜ {s1_concl}</span>
-• <b>現況數據</b>：剔除 ETF 後之純個股維持率為 <b style="color:#ffd54f; font-size:16.5px;">{in_maint_pct:.1f}%</b>，已自11月初斷頭底回升。<br>
+• <b>現況數據</b>：剔除 ETF 後之純個股維持率為 <b style="color:#ffd54f; font-size:16.5px;">{in_maint_pct:.1f}%</b>（大盤融資餘額約 5,334 億仍偏高，需震盪清洗浮額）。<br>
 • <b>判讀基準</b>：<b style="color:#00e676;">135% ～ 145% 為常態波段落底甜美區</b>；跌破 <b>135%</b> 觸發 T+2 早盤強制斷頭萬箭齊發。
 </div>
 <div class="war-dim-item" style="border-left: 5px solid #ffd54f;">
 <span class="war-dim-concl">5. 📊 大小台期貨動向（得分：{s2_fut} / 25 分）｜ {s2_concl}</span>
-• <b>大台籌碼</b>：<b>外資 {in_fini_chg:+,}口</b> (未平倉 <b>{in_fini_oi:+,}口</b>) ｜ <b style="color:#ff8a80;">投信 {sitc_tx_chg_v:+,}口</b> (未平倉 <b>{in_sitc_oi:+,}口</b>) ➔ 實質空單 <b>{real_directional_fini_oi:+,}口</b>。<br>
+• <b>大台籌碼</b>：<b>外資 {in_fini_chg:+,}口</b> (未平倉 <b>{in_fini_oi:+,}口</b>，已降至10萬口以下) ｜ <b style="color:#ff8a80;">投信 {sitc_tx_chg_v:+,}口</b> (未平倉 <b>{in_sitc_oi:+,}口</b>)。<br>
 • <b>小台與成本</b>：<b>小台外資 {fini_mtx_chg_v:+,}口</b> / <b style="color:#00e676;">小台散戶 {retail_mtx_chg_v:+,}口</b> ｜ 🎯 <b>外資佈空成本 {est_short_cost:,.0f}點</b> (滿足點 <b>{target_cover_2:,.0f}點</b>)。
 </div>
 <div class="war-dim-item" style="border-left: 5px solid #00e676;">
 <span class="war-dim-concl">6. 🎯 選擇權PCR＋權證避險（得分：{s3_opt_war} / 20 分）｜ {s3_concl}</span>
-• <b>選擇權 PCR</b>：全月份 Put/Call Ratio 為 <b style="color:#00e676; font-size:16.5px;">{in_pcr:.1f}%</b>（得分 <b>{s3_pcr}/12分</b>；<b>&gt;80%免扣分</b>、莊家下檔支撐穩固）。<br>
+• <b>選擇權 PCR</b>：全月份 Put/Call Ratio 為 <b style="color:#00e676; font-size:16.5px;">{in_pcr:.1f}%</b>（得分 <b>{s3_pcr}/12分</b>；留意下週三期權月結算外資避險動態）。<br>
 • <b>權證避險</b>：自營商真實 Delta 避險買賣超為 <b style="color:#ff8a80; font-size:16.5px;">{in_warrant_yi:+.2f} 億元</b>（得分 <b>{s3_war}/8分</b>；<b>{war_note_txt}</b>）。
 </div>
 <div class="war-dim-item" style="border-left: 5px solid #00e676;">
-<span class="war-dim-concl">7. ⚡ 60分K與日5MA微觀扳機（得分：{s4_k60} / 15 分）｜ {s4_concl}</span>
-• <b>微觀位階</b>：60分5MA 為 <b>{fleet['k60_ma5']:,.0f}點</b>、60分20MA 為 <b>{fleet['k60_ma20']:,.0f}點</b>；60分KDJ 之 K={k60_k:.1f} / D={k60_d:.1f} / <b style="color:#ffd54f;">J={k60_j:.1f} ({k60_j_trend})</b>。<br>
-• <b>實戰意義</b>：目前已重新站上 60分5MA(<b>{fleet['k60_ma5']:,.0f}點</b>) 與 日5MA(<b>{twii_ma5:,.0f}點</b>)，展開 c 浪挑戰月線(<b>{twii_ma20:,.0f}點</b>)反壓。
-</div>
-<div class="war-dim-item" style="border-left: 5px solid #00e676;">
-<span class="war-dim-concl">8. 📈 均線空間、KDJ與台幣匯率（空間得分：{s5_space}/15分 ｜ 匯率：{fx_score_adj_str}）</span>
+<span class="war-dim-concl">7. ⚡ 60分K與日5MA/10MA扳機（扳機：{s4_k60}/15分 ｜ 空間：{s5_space}/15分）</span>
 • <b>各級均線</b>：<b>5MA {twii_ma5:,.0f}</b>({fleet['bias_5']:+.1f}%) ｜ <b>10MA {twii_ma10:,.0f}</b>({fleet['bias_10']:+.1f}%) ｜ <b>月線 {twii_ma20:,.0f}</b>({fleet['bias_20']:+.1f}%) ｜ <b>季線 {twii_ma60:,.0f}</b> ｜ <b>半年線 {twii_ma120:,.0f}</b> ｜ <b>年線 {twii_ma240:,.0f}</b>。<br>
-• <b>指標與匯率</b>：日J=<b style="color:#ffd54f;">{j_now:.1f} ({j_trend_str})</b> ｜ 台幣 <b style="color:#00e676;">{fx_now:.3f}元</b> (5MA={fx_ma5:.3f}，{fx_concl.replace('📌 結論：', '')})。
+• <b>動能指標</b>：60分5MA <b>{fleet['k60_ma5']:,.0f}</b> (60分J={k60_j:.1f}) ｜ 日K={fleet['k9']} / D={fleet['d9']} / <b style="color:#ffd54f;">日J={j_now:.1f} ({j_trend_str})</b>。
+</div>
+<div class="war-dim-item" style="border-left: 5px solid {tnx_border_col};">
+<span class="war-dim-concl">8. 💵 宏觀美債10Y殖利率(^TNX) ＆ 新台幣匯率利差雷達｜ {fx_concl}</span>
+• <b>美台利差監控</b>：美國10年期公債殖利率 <b>^TNX = <span style="color:#ff8a80; font-size:16.5px;">{tnx_val:.2f}%</span> ({tnx_chg:+.2f}%)</b> ｜ 美元兌台幣 <b>USD/TWD = <span style="color:#ffd54f; font-size:16.5px;">{fx_now:.3f} 元</span></b> (5MA={fx_ma5:.3f})。<br>
+• {fleet_2x_macro_tip}
 </div>
 </div>
 <div class="war-action-box">
 <div style="font-size:19px; font-weight:900; color:#ffd54f; margin-bottom:8px; border-bottom:1px solid rgba(255,213,79,0.3); padding-bottom:4px;">
-🔮 【大盤長中短多空趨勢定性 ＆ 波段「預計漲到哪裡 ／ 跌到哪裡」階段導航總結】：
+🔮 【大盤長中短多空趨勢定性 × 宏爺三大新穀倉導航 × 波段「預計漲到哪裡 ／ 跌到哪裡」總結】：
 </div>
-• <b>📌 核心結論（目前所處階段）</b>：<span class="stage-pill-active">🔥 11/13 已將最後 1 張正2(@32.57) 獲利出清✅！大盤正挑戰【節點B：月線 {twii_ma20:,.0f} ～ 半年線 {twii_ma120:,.0f} 點】反壓區，日J={j_now:.1f}偏高，個股買支撐不追高！</span><br>
-• <b>🧭 雙龍頭專屬技術導航</b>：<br>
-&nbsp;&nbsp;① <b>力成 (6239，現價 {p_6239:.1f}元，持1張@253)</b>：<b style="color:#00e676;">今日已突破年線({m6239['ma240']:.1f}元)與月線({m6239['ma20']:.1f}元)翻紅！</b>惟短線日J({m6239['j_val']:.0f})偏高，預計先<b>回測年線與月線支撐區 ({pti_ma240_sup_s}元) 良性換手後，再向上挑戰季線 {pti_b_take_s}元 (270元關卡)</b>！<br>
-&nbsp;&nbsp;② <b>光寶科 (2301，現價 {p_2301:.1f}元，持1張@216)</b>：<b style="color:#ffd54f;">目前於 60分K (228~234.5元) 進行箱型橫盤整理</b>，日線穩守 10MA({m2301['ma10']:.1f}元)之上；待下週月線扣抵值下降走平後，有望帶量突破箱頂直攻 <b>月線與半年線 ({liteon_res_s}元)</b>！<br>
+• <b>📌 核心結論（目前所處階段）</b>：<span class="stage-pill-active">🔥 11/13 已將最後 1 張正2(@32.57) 獲利出清✅！大盤正挑戰【節點B：月線 {twii_ma20:,.0f} ～ 半年線 {twii_ma120:,.0f} 點】反壓區，面對美債殖利率 {tnx_val:.2f}% 與舊穀倉ODM墊料風險，資金全面轉向「三大新穀倉」與「政策內需防彈衣」！</span><br>
+• <b>🌾 您的核心持股（新穀倉雙龍頭）技術導航</b>：<br>
+&nbsp;&nbsp;① <b>力成 (6239·📱新穀倉3，現價 {p_6239:.1f}元，持1張@253)</b>：<b style="color:#00e676;">今日已突破年線({m6239['ma240']:.1f}元)與月線({m6239['ma20']:.1f}元)翻紅！</b>惟短線日J({m6239['j_val']:.0f})偏高，預計先<b>回測年線與月線支撐區 ({pti_ma240_sup_s}元) 良性換手後，再向上挑戰季線 {pti_b_take_s}元 (270元關卡)</b>！<br>
+&nbsp;&nbsp;② <b>光寶科 (2301·⚡新穀倉2，現價 {p_2301:.1f}元，持1張@216)</b>：<b style="color:#ffd54f;">目前於 60分K (228~234.5元) 進行箱型橫盤整理</b>，日線穩守 10MA({m2301['ma10']:.1f}元)之上；待下週月線扣抵值下降走平後，有望帶量突破箱頂直攻 <b>月線與半年線 ({liteon_res_s}元)</b>！<br>
 • 🚀 <b style="color:#ff8a80; font-size:16.5px;">大盤預計會【漲到哪裡】（上檔三階段目標與完成度標註）</b>：<br>
-&nbsp;&nbsp;① <b>第一階段（突破 5MA/10MA 攻抵 44,000～{fleet['twii_high']:,.0f} 點）</b>：<span class="stage-pill-done">✅ 已達成！（廣達@291.5、0050@103.05、正2@32.31/32.13/32.57 全數獲利收割完畢！）</span><br>
+&nbsp;&nbsp;① <b>第一階段（突破 5MA/10MA 攻抵 44,000～{fleet['twii_high']:,.0f} 點）</b>：<span class="stage-pill-done">✅ 已達成！（舊穀倉廣達@291.5、0050@103.05、正2@32.31/32.13/32.57 全數獲利收割完畢！）</span><br>
 &nbsp;&nbsp;② <b>第二階段（節點B：挑戰下彎月線 {twii_ma20:,.0f} ～ 5月線 {twii_m_ma5:,.0f} ～ 半年線 {twii_ma120:,.0f} 點）</b>：<span class="stage-pill-active">🎯 當前逼近中（距月線僅差 {max(0.0, twii_ma20 - twii_now):,.0f} 點！光寶科於 {liteon_res_s}元 鎖利、力成於 {pti_b_take_s}元 調節價差）</span><br>
 &nbsp;&nbsp;③ <b>第三階段（極限反壓：下彎 60MA 季線 {twii_ma60:,.0f} ～ 布林上軌 {fleet['bb_upper']:,.0f} 點）</b>：<span class="stage-pill-wait">⏳ 強壓天花板（季線扣高下彎，初碰必拉回打 12月中 節點C 右腳）</span><br>
 • 🛡️ <b style="color:#80d8ff; font-size:16.5px;">大盤預計拉回會【跌到哪裡】（下檔三道防守支撐與建議進場價位）</b>：<br>
@@ -2298,28 +2451,28 @@ with tab1:
     df_blueprint_table = pd.DataFrame([
         {
             "波浪節點與時間": "0. 節點A ➔ 11/12~13 強彈波",
-            "目前狀態": "✅ 已完成 (廣達與正2均已高檔獲利出清！)",
+            "目前狀態": "✅ 已完成 (舊穀倉廣達與正2均已高檔出清！)",
             "大盤動態點位": f"37,837 ➔ {fleet['twii_high']:,.0f}點",
-            "力成(6239) 扇形封裝主軸": f"持1張@253.0 (現價{p_6239:.1f}元已站上年線{m6239['ma240']:.1f}與月線{m6239['ma20']:.1f})",
-            "光寶科(2301) 雲端電源主軸": f"持1張@216.0 (現價{p_2301:.1f}元，帳面獲利+16,200元)",
-            "0050正2 (00631L) 操作": "11/12買1張@30.99 ➔ 11/13早盤已於 @32.57 獲利出清✅ (目前0張空手)",
+            "力成(6239·📱新穀倉3) 扇形封裝": f"持1張@253.0 (現價{p_6239:.1f}元已站上年線{m6239['ma240']:.1f}與月線{m6239['ma20']:.1f})",
+            "光寶科(2301·⚡新穀倉2) 雲端電源": f"持1張@216.0 (現價{p_2301:.1f}元，帳面獲利+16,200元)",
+            "0050正2 (00631L) 操作": "11/12買1張@30.99 ➔ 11/13早盤已於 @32.57 獲利出清✅ (0張空手)",
             "00400A 存股 (持31張@14.4)": f"現價 {p_00400a:.2f}元，暫停追高、等待拉回 12.60元 以下買區"
         },
         {
             "波浪節點與時間": "1. 短線換手支撐 (回測年線/5MA)",
             "目前狀態": f"🔥 盤中隨時觸發 (大盤日J={j_now:.1f}偏高)",
             "大盤動態點位": f"42,815～{twii_ma5:,.0f}點 (守5MA/10MA)",
-            "力成(6239) 扇形封裝主軸": f"🎯【回測年線支撐】先看回測年線/月線 {pti_ma240_sup_s}元 守穩再上；若洗盤至 {pti_b_dip_s}元 低接第2張",
-            "光寶科(2301) 雲端電源主軸": f"🎯【60分K箱型整理】於 228~234.5元 橫盤消化賣壓，守日10MA({m2301['ma10']:.1f}元)續抱待下週突破",
-            "0050正2 (00631L) 操作": f"空手觀望；若大盤急跌回測日5MA/10MA (正2約 {k_mas['00631L']['ma5']:.2f}~30.2元) 才考慮短接",
+            "力成(6239·📱新穀倉3) 扇形封裝": f"🎯【回測年線支撐】先看回測年線/月線 {pti_ma240_sup_s}元 守穩再上；若洗盤至 {pti_b_dip_s}元 低接第2張",
+            "光寶科(2301·⚡新穀倉2) 雲端電源": f"🎯【60分K箱型整理】於 228~234.5元 橫盤消化賣壓，守日10MA({m2301['ma10']:.1f}元)續抱待下週突破",
+            "0050正2 (00631L) 操作": f"受月線反壓與美債利差(^TNX {tnx_val:.2f}%)影響暫停追高，待費半站穩年線與融資清洗再進場",
             "00400A 存股 (持31張@14.4)": "🎯【第一階進場價：12.40~12.60元】拉回買區時試單買3~4張(動用30%資金)"
         },
         {
             "波浪節點與時間": "2. 節點B (11月底 c浪攻月/半年線)",
             "目前狀態": "🎯 下週主攻目標區",
             "大盤動態點位": f"44,200～{twii_ma120:,.0f}點 (月線{twii_ma20:,.0f})",
-            "力成(6239) 扇形封裝主軸": f"🏆【短線挑戰270目標】換手後向上挑戰季線反壓 {pti_b_take_s}元 (270關卡) 調節價差或鎖利！",
-            "光寶科(2301) 雲端電源主軸": f"🏆【下週突破目標價】60分K盤整突破後，挑戰月/半年線 ({liteon_res_s}元) 逢高鎖利換現！",
+            "力成(6239·📱新穀倉3) 扇形封裝": f"🏆【短線挑戰270目標】換手後向上挑戰季線反壓 {pti_b_take_s}元 (270關卡) 調節價差或鎖利！",
+            "光寶科(2301·⚡新穀倉2) 雲端電源": f"🏆【下週突破目標價】60分K盤整突破後，挑戰月/半年線 ({liteon_res_s}元) 逢高鎖利換現！",
             "0050正2 (00631L) 操作": "已於 @32.57 提早獲利收割完畢✅ 保持空手避開月/半年線反壓震盪",
             "00400A 存股 (持31張@14.4)": "12.80~13.10元暫停追高，握緊現金等節點C右腳"
         },
@@ -2327,17 +2480,17 @@ with tab1:
             "波浪節點與時間": "3. 節點C (12月中~1月中右腳)",
             "目前狀態": "⏳ 波段雙主軸黃金買點",
             "大盤動態點位": "41,500～42,000點 (量縮打右腳)",
-            "力成(6239) 扇形封裝主軸": f"💎【波段黃金進場價】於前波起漲底 {pti_c_buy_s}元 買進第 2、3 張迎接2027 FOPLP！",
-            "光寶科(2301) 雲端電源主軸": f"💎【波段黃金進場價】於前波平台 {liteon_c_buy_s}元 買進第 2、3 張光寶科",
-            "0050正2 (00631L) 操作": "空手觀望 (資金集中於力成、光寶科與00400A)",
+            "力成(6239·📱新穀倉3) 扇形封裝": f"💎【波段黃金進場價】於前波起漲底 {pti_c_buy_s}元 買進第 2、3 張迎接2027 FOPLP！",
+            "光寶科(2301·⚡新穀倉2) 雲端電源": f"💎【波段黃金進場價】於前波平台 {liteon_c_buy_s}元 買進第 2、3 張光寶科",
+            "0050正2 (00631L) 操作": "空手觀望 (資金集中於新穀倉力成、光寶科與00400A)",
             "00400A 存股 (持31張@14.4)": "💎【第二階進場價：12.15~12.45元】投40%資金買 6~7張 (推升至41張)"
         },
         {
             "波浪節點與時間": "4. 節點D1 (2027/3底 Q1壓線頂)",
             "目前狀態": "⏳ 2027 Q1 波段逃命頂",
             "大盤動態點位": "44,000點 (大三角上軌末端)",
-            "力成(6239) 扇形封裝主軸": f"🏆【波段主升目標價】趁 FOPLP 試產題材衝 {m6239['d1_take_low']:.0f}~{m6239['d1_take_high']:.0f}元 分批獲利了結！",
-            "光寶科(2301) 雲端電源主軸": f"🏆【波段主升目標價】趁 800VDC 量產衝 {m2301['d1_take_low']:.0f}~{m2301['d1_take_high']:.0f}元 賣出2張鎖利！",
+            "力成(6239·📱新穀倉3) 扇形封裝": f"🏆【波段主升目標價】趁 FOPLP 試產題材衝 {m6239['d1_take_low']:.0f}~{m6239['d1_take_high']:.0f}元 分批獲利了結！",
+            "光寶科(2301·⚡新穀倉2) 雲端電源": f"🏆【波段主升目標價】趁 800VDC 量產衝 {m2301['d1_take_low']:.0f}~{m2301['d1_take_high']:.0f}元 賣出2張鎖利！",
             "0050正2 (00631L) 操作": "空手觀望，嚴防月MACD翻綠與報稅季賣壓",
             "00400A 存股 (持31張@14.4)": "12.60~13.20元暫停單筆加碼，僅用月配息 0.12元 滾零股"
         },
@@ -2345,8 +2498,8 @@ with tab1:
             "波浪節點與時間": "5. 節點D2 (2027/4~5月 C波終極底)",
             "目前狀態": "⏳ 2027 終極重錘抄底區",
             "大盤動態點位": f"40,000～41,000點 (年線{twii_ma240:,.0f}+)",
-            "力成(6239) 扇形封裝主軸": f"🎯【長線鐵底進場價】於 {m6239['d2_buy_low']:.0f}~{m6239['d2_buy_high']:.0f}元 長線低接迎接下半年CPO整合",
-            "光寶科(2301) 雲端電源主軸": f"🎯【長線鐵底進場價】於年線區 {m2301['d2_buy_low']:.0f}~{m2301['d2_buy_high']:.0f}元 低接1張或轉存股",
+            "力成(6239·📱新穀倉3) 扇形封裝": f"🎯【長線鐵底進場價】於 {m6239['d2_buy_low']:.0f}~{m6239['d2_buy_high']:.0f}元 長線低接迎接下半年CPO整合",
+            "光寶科(2301·⚡新穀倉2) 雲端電源": f"🎯【長線鐵底進場價】於年線區 {m2301['d2_buy_low']:.0f}~{m2301['d2_buy_high']:.0f}元 低接1張或轉存股",
             "0050正2 (00631L) 操作": "空手觀望或長線低接",
             "00400A 存股 (持31張@14.4)": "👑【第三階進場價：11.80~12.10元】重錘買 8~12張，破50張自體繁殖！"
         }
@@ -2354,7 +2507,7 @@ with tab1:
     st.dataframe(df_blueprint_table, use_container_width=True, hide_index=True)
 
     # 4. 程式資料總結數據包
-    with st.expander("📋 點此展開／收合【程式資料總結數據包 ➔ 內含台股當日熱門爆量族群、大盤全指標評分、力成/光寶科導航與三大法人明細】", expanded=True):
+    with st.expander("📋 點此展開／收合【程式資料總結數據包 ➔ 內含宏爺穀倉防墊料評級、台股熱門爆量族群、大盤全指標評分與三大法人明細】", expanded=True):
         st.text_area("📱 手機/電腦可直接全選複製以下總結資料包貼給 Gemini 淘金客進行雙核 20 模組深度健檢：", value=build_complete_ai_snapshot(), height=195)
 
     # 5. 大盤各級均線支撐壓力與扣抵點位導航表
@@ -2388,7 +2541,7 @@ with tab1:
     st.dataframe(df_ma_matrix, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.caption("💡 【v56.0 嚴格旱地拔蔥濾網＋昨日量比】已新增「昨日量比（今日預估量 ÷ 昨日收盤量）」，並強制規定入榜股必須 **「現價站上 20MA 月線 且 DMI 多方控盤 (+DI > -DI)」**！")
+    st.caption(f"💡 【v57.0 宏爺穀倉加權＋防墊料過濾】已自動剔除「🐀疑似墊料壓貨股」，且當觸發美債利差警戒（目前 `^TNX={tnx_val:.2f}%`）時，自動將「🌟新穀倉1(共通規格)」與「🛡️政策內需防彈衣」優先置頂！")
     st.markdown("#### 🔥 【表 1-A：短線看技術＋基本面（站穩月線＋DMI多方＋單月與累計年營收雙成長・真旱地拔蔥點火榜）】")
     if not df_launch_fund.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_launch_fund)), use_container_width=True)
     else: st.info("今日盤面暫無同時符合「站穩20MA月線 ＋ DMI(+DI>-DI)多方 ＋ 單月與累計營收雙成長」之真旱地拔蔥標的。")
@@ -2397,25 +2550,43 @@ with tab2:
     if not df_launch_pure.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_launch_pure)), use_container_width=True)
     else: st.info("今日盤面暫無符合「站穩月線＋純技術籌碼旱地拔蔥點火」之標的。")
 
-    st.markdown("#### 🎯 【表二：N字洗盤蓄勢 ＆ 拉回月線/十日線低接榜（含三大法人買賣超與 EPS SOP v2.0）】")
+    st.markdown("#### 🎯 【表二：N字洗盤蓄勢 ＆ 拉回月線/十日線低接榜（含穀倉賽道標籤與三大法人買賣超）】")
     if not df_pullback.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_pullback)), use_container_width=True)
     else: st.info("今日暫無符合量縮回測月線有守之標的。")
 
-    st.markdown("#### 🛡️ 【表三：上升軌道推升 ＆ KD鈍化 / 3日急拉警戒榜（含三大法人買賣超與 EPS SOP v2.0）】")
+    st.markdown("#### 🛡️ 【表三：上升軌道推升 ＆ KD鈍化 / 3日急拉警戒榜（含穀倉賽道標籤與三大法人買賣超）】")
     if not df_orbit.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_orbit)), use_container_width=True)
     else: st.info("今日暫無符合多頭軌道推升之標的。")
 
 with tab3:
-    st.caption("💎 【淘金客 EPS 預估 SOP v2.0（時序收斂 ＋ 三率體質乘數 T）】已將新核心持股 `6239 力成 (👑電子權值・FOPLP扇形封裝龍頭)` 納入核心權值追蹤池！")
-    st.markdown("#### 🏛️ 【表 3-A：👑 電子權值股 ＆ 🏦 金融官股/龍頭金控 長線多頭核心波段榜（站穩月線 ＋ DMI多方 ＋ EPS SOP v2.0）】")
+    st.caption("💎 【淘金客 EPS SOP v2.0 × 宏爺三大新穀倉＆政策防彈衣】已自動顯示每檔權值股之「穀倉賽道與防墊料」評級，並在利差提款警戒時自動將「🌟新穀倉1」與「🛡️政策內需防彈衣」置頂！")
+    st.markdown("#### 🏛️ 【表 3-A：👑 核心權值與政策防彈衣 長線多頭波段榜（站穩月線 ＋ DMI多方 ＋ 穀倉加權）】")
     if not df_long_bc.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_long_bc)), use_container_width=True)
     else: st.info("今日大盤回檔，暫無同時站上月線且 DMI 多方之權值股；請參考下方【表 3-B】低估鑽石買點！")
 
-    st.markdown("#### 🔄 【表 3-B：🔄 轉機題材特選股 ＆ 💎 電子/金融權值股月線下築底反彈買點榜（含 6239 力成、2301 光寶科等回測支撐標的）】")
+    st.markdown("#### 🔄 【表 3-B：🔄 轉機題材特選股 ＆ 💎 新穀倉/防彈衣權值股回測支撐買點榜（含 6239力成、2301光寶科等）】")
     if not df_long_turn.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_long_turn)), use_container_width=True)
     else: st.info("目前暫無符合條件之轉機題材股或權值回測買點。")
 
 with tab4:
+    st.markdown("#### 🌾 【宏爺講股：三大新穀倉 vs. 🛡️政策內需防彈衣 vs. 🐀最後一隻老鼠（防墊料壓貨）全景體檢專區】")
+    st.caption("💡 依據《史記・李斯列傳》「倉鼠之嘆」與富士軟片轉型戰略：在輝達算力永動機降速與舊穀倉 ODM 承受「先墊錢買高價料件、存貨天數拉長」風險前，將資金全面配置於 **🌟新穀倉1（CSP自研/共通規格 +15分）**、**⚡新穀倉2（缺電/過熱基建 +10分）**、**📱新穀倉3（邊緣AI與記憶體封測 +5分）** 與 **🛡️政策內需防彈衣（兆元投資水電工程/金控）**！")
+
+    if not df_granary_audit.empty:
+        df_g_safe = df_granary_audit[~df_granary_audit["代碼"].isin(OLD_GRANARY_ODM_WATCH)].copy()
+        df_g_odm = df_granary_audit[df_granary_audit["代碼"].isin(OLD_GRANARY_ODM_WATCH)].copy()
+
+        st.markdown("##### 🌟 【一、三大新穀倉（共通規格／電力散熱／邊緣封測）＆ 🛡️ 政策內需防彈衣 即時戰力排行】")
+        st.dataframe(style_tw_stock_df(pin_code_name_index(df_g_safe)), use_container_width=True)
+
+        st.markdown("##### 🐀 【二、最後一隻老鼠（舊穀倉純伺服器組裝 ODM：季報存貨 QoQ ＆ 營業現金流防墊料壓貨體檢表）】")
+        st.caption("⚠️ 防雷規則：若硬體組裝廠出現「月營收 YoY > 0（表面創高），但季存貨或應收帳款大幅攀升 >= 20% 且營業現金流為負（代客墊料積壓資金）」，強制標記 **「🐀 警戒：疑似墊料壓貨」並扣減多方評分 20 分**！")
+        if not df_g_odm.empty:
+            st.dataframe(style_tw_stock_df(pin_code_name_index(df_g_odm)), use_container_width=True)
+    else:
+        st.info("正在載入穀倉賽道資料...")
+
+with tab5:
     target_latest_ym = get_target_revenue_ym_list()[0][2]
     st.markdown("#### 📈 【上市櫃每月營收動態撈取 ＆ 玩法 1~5 全整合（2年破繭 ＋ EPS SOP v2.0 ＋ 三大法人 ＋ 備註AI真偽）快篩專區】")
     st.caption(f"📡 動態月份引擎：自動推算最新應公布月份為 **{target_latest_ym} (民國年月)**！已全面導入「淘金客 EPS 預估 SOP v2.0 (含三率乘數T)」、「三大法人買賣超」並徹底排除營建建案交屋股！")
@@ -2468,7 +2639,8 @@ with tab4:
                 & (~df_filtered["備註AI真偽鑑別"].str.contains("🏗️", na=False))
                 & (~df_filtered["轉機與成長型態"].str.contains("🏗️", na=False))
                 & (~df_filtered["代碼"].isin(CONSTRUCTION_BLACKLIST))
-            )
+            ) | (df_filtered["代碼"].isin(POLICY_DEFENSE_ARMOR))
+
             if "久旱逢甘霖" in quick_mode:
                 df_filtered = df_filtered[
                     df_filtered["轉機與成長型態"].str.contains("久旱逢甘霖|低迷翻揚", na=False)
@@ -2541,7 +2713,7 @@ with tab4:
 
         with st.expander(f"📋 【玩法 1~5 專屬 AI 深度獵殺數據包】點此展開一鍵複製當前 {match_cnt} 檔轉機股完整明細貼給 Gemini 挑出前 3 強！", expanded=False):
             hunt_lines = [
-                f"【⚡ 淘金客 v23.0 雙核 20 模組強制聯網深度獵殺指令】：請針對以下分頁四篩選出之 {match_cnt} 檔『久旱破繭轉機股』，自主聯網查證其最新法說會題材、主力分點籌碼、資券借與CB可轉債轉換價，結合『淘金客 EPS 預估 SOP v2.0（時序收斂＋三率乘數T）』，嚴格依『模組20：雙核全維度輸出格式』為我挑出前 3 檔最具波段爆發力之真轉機鑽石股！"
+                f"【⚡ 淘金客 v23.0 雙核 20 模組強制聯網深度獵殺指令】：請針對以下分頁五篩選出之 {match_cnt} 檔『久旱破繭轉機股』，自主聯網查證其最新法說會題材、主力分點籌碼、資券借與CB可轉債轉換價，結合『宏爺新穀倉防墊料原則』與『淘金客 EPS 預估 SOP v2.0（時序收斂＋三率乘數T）』，嚴格依『模組20：雙核全維度輸出格式』為我挑出前 3 檔最具波段爆發力之真轉機鑽石股！"
             ]
             for idx_r, (_, r_rev) in enumerate(df_filtered.head(35).iterrows(), 1):
                 eps_u = f"{r_rev['預估EPS(元)']:.2f}元" if pd.notna(r_rev.get("預估EPS(元)")) else "待轉盈"
