@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import datetime, pytz, requests, urllib3, io, os, json, time, re
+import datetime, calendar, pytz, requests, urllib3, io, os, json, time, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股每日戰情室 v60.0", page_icon="🚨", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="台股每日戰情室 v61.0", page_icon="🚨", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
 .war-hero-box { background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%); color: #fff; padding: 20px 24px; border-radius: 14px; border-left: 8px solid #00e676; margin-bottom: 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); }
 .war-hero-box-danger { background: linear-gradient(135deg, #2b0f14 0%, #451219 50%, #5c1620 100%); color: #fff; padding: 20px 24px; border-radius: 14px; border-left: 8px solid #ff4d4f; margin-bottom: 16px; box-shadow: 0 6px 20px rgba(255,77,79,0.28); }
-.war-hero-box-warn { background: linear-gradient(135deg, #2b1d1d 0%, #3d251e 50%, #4a2c2a 100%); color: #fff; padding: 20px 24px; border-radius: 14px; border-left: 8px solid #ff9800; margin-bottom: 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); }
+.war-hero-box-warn { background: linear-gradient(135deg, #2b1d1d 0%, #3d251e 50%, #4a2c2a 100%); color: #fff; padding: 20px 24px; border-radius: 14px; border-left: 8px solid #fbbf24; margin-bottom: 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); }
 .event-banner-red { background: linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%); color: #fff; padding: 11px 18px; border-radius: 10px; border: 2px solid #f87171; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
 .event-banner-yellow { background: linear-gradient(90deg, #422006 0%, #713f12 100%); color: #fef08a; padding: 11px 18px; border-radius: 10px; border: 2px solid #facc15; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
 .event-banner-blue { background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%); color: #e2e8f0; padding: 11px 18px; border-radius: 10px; border: 1px solid #38bdf8; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
@@ -23,8 +23,9 @@ st.markdown("""
 .war-dim-item { background: rgba(255,255,255,0.08); padding: 13px 16px; border-radius: 10px; font-size: 14.8px; line-height: 1.7; }
 .war-dim-concl { font-size: 16px; font-weight: 900; color: #ffd54f; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 5px; display: block; }
 .tab-guide-box { background: #161b22; color: #e5e7eb; border-left: 5px solid #38bdf8; padding: 12px 16px; border-radius: 8px; margin-bottom: 14px; font-size: 14.5px; line-height: 1.7; }
-.swap-card { background: #0f172a; color: #f8fafc; border-radius: 12px; padding: 16px 20px; border: 2px solid #38bdf8; margin-bottom: 14px; line-height: 1.7; }
-.pkg-box { background: #0f172a; border: 2px solid #f59e0b; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; color: #f8fafc; }
+.swap-card { background: #0f172a; color: #f8fafc; border-radius: 12px; padding: 16px 20px; border: 2px solid #38bdf8; margin-bottom: 14px; line-height: 1.72; }
+.short-ledger-ok { background: #0d231d; color: #e2e8f0; border-radius: 12px; padding: 15px 19px; border: 2px solid #00e676; margin-bottom: 14px; line-height: 1.7; }
+.short-ledger-stop { background: #2d0f14; color: #fff; border-radius: 12px; padding: 15px 19px; border: 2px solid #ff4d4f; margin-bottom: 14px; line-height: 1.7; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,38 +86,194 @@ def style_tw_stock_df(df):
     except Exception: return df
 
 # ==========================================
-# 模組二：2026/11 ～ 2027/01 關鍵風險事件行事曆
+# 模組二 (v61.0 升級)：雙軌自動滾動事件引擎（官方全年度預告庫 ＋ 數學演算法月度滾動 ＋ 多空劇本推演）
 # ==========================================
-EVENT_CALENDAR_2026_2027 = [
-    {"date": "2026-11-23", "title": "金管會「限空令 3.0」正式上路（全市場禁平盤下放空/融券150%/禁發認售）", "level": "HIGH", "action": "觀察開盤回測月20MA(33,746)與T+2融資斷頭餘波，反彈不追高"},
-    {"date": "2026-11-25", "title": "美國 10 月 PCE 物價指數 ＆ Q3 GDP 修正值", "level": "HIGH", "action": "牽動 12 月 Fed 升息定價與美債殖利率，嚴禁開槓桿"},
-    {"date": "2026-11-30", "title": "MSCI 11 月半年度調整收盤生效（台股新興市場權重升至 29.01%）", "level": "MED", "action": "警戒 13:25~13:30 尾盤爆量甩尾，觀察新增主流股買盤"},
-    {"date": "2026-12-01", "title": "黃仁勳與輝達法務長赴美國參眾兩院聽證會（12/01~12/03，12/3 參院公開作證）", "level": "HIGH", "action": "AI 供應鏈情緒高波動期，反彈遇壓減碼、嚴守現金水庫"},
-    {"date": "2026-12-04", "title": "美國 11 月非農就業報告", "level": "HIGH", "action": "FOMC 前最後關鍵就業數據，慎防美股大幅震盪"},
-    {"date": "2026-12-08", "title": "聯準會 FOMC 利率決議與點陣圖（12/08~12/09）", "level": "HIGH", "action": "市場已提前反映 3~4 碼升息，緊盯是否出現利空出盡與二次測底買點"},
-    {"date": "2026-12-10", "title": "台積電 11 月營收、美國 11 月 CPI、美商務部長盧特尼克參院作證", "level": "HIGH", "action": "基本面與晶片出口政策雙重檢驗，確認 AI 訂單真實續航力"},
-    {"date": "2026-12-15", "title": "Anthropic (ANT) 首波早期鎖定期解禁（3.03 億股）", "level": "HIGH", "action": "提防美股科技流動性抽血效應，關注台股 W 底右腳支撐"},
-    {"date": "2026-12-16", "title": "台指期與選擇權 12 月月結算日", "level": "MED", "action": "外資近 10 萬口空單換倉/結算表態，觀察期現貨逆價差收斂"},
-    {"date": "2026-12-21", "title": "ANT 快速納入那斯達克 100 生效 ＆ 美 BIS 晶片新規舊約運送截止日", "level": "HIGH", "action": "防範重演 SpaceX 納入日倒貨潮與出口管制搶運潮退潮"},
-    {"date": "2026-12-23", "title": "美國 11 月 PCE 物價指數", "level": "MED", "action": "年底外資休假前最後通膨數據"},
-    {"date": "2027-01-19", "title": "美國 BIS 晶片新規評論截止日", "level": "HIGH", "action": "2027 Q1 半導體出口規範定案關鍵時點"}
+CUSTOM_EVENTS_FILE = "custom_risk_events.json"
+
+OFFICIAL_ANCHOR_EVENTS = [
+    {"date": "2026-11-23", "cat": "POLICY", "short": "限空令3.0上路", "title": "金管會「限空令 3.0」正式上路（全市場禁平盤下放空/融券150%/禁發認售）", "level": "HIGH",
+     "bull": "空頭回補與國安基金護盤共振，守住月20MA(33,484)展開跌深反彈",
+     "bear": "國際賣壓過重、量縮盤跌，10日內未連3日站10MA定性為政策逃命波",
+     "action": "紅燈減碼避開 09:00-09:10 低點，改 09:15 後或反彈遇壓執行；嚴禁追買"},
+    {"date": "2026-11-25", "cat": "PCE", "short": "美10月PCE/GDP", "title": "美國 10 月 PCE 物價指數 ＆ Q3 GDP 修正值", "level": "HIGH",
+     "bull": "核心PCE低於預期 ➔ 美債10Y續跌破4.8%，科技股估值壓力大幅緩解",
+     "bear": "通膨黏性回升 ➔ 強化 12 月鷹派升息預期，美債重返 5% 引發二次測底",
+     "action": "事件前 3 天內反彈遇壓減碼弱勢股、嚴禁開槓桿"},
+    {"date": "2026-11-30", "cat": "MSCI", "short": "MSCI 11月生效", "title": "MSCI 11 月半年度調整收盤生效（台股新興市場權重升至 29.01%）", "level": "MED",
+     "bull": "外資被動買盤湧入新增主流股(南電/台燿/CPO/封測設備)，尾盤爆量拉抬",
+     "bear": "剔除股(中租/元太/嘉澤/萬海)尾盤 13:25-13:30 遭大單甩尾砍殺，新增股利多出盡",
+     "action": "避開 13:25 追高新增股；留意景碩(3189)處置延後風險"},
+    {"date": "2026-12-01", "cat": "NVDA", "short": "老黃國會聽證", "title": "黃仁勳與輝達法務長赴美國參眾兩院聽證會（12/01~12/03，12/3公開作證）", "level": "HIGH",
+     "bull": "釐清對中出口與會計疑慮、未有進一步刑事起訴 ➔ AI 供應鏈情緒修復",
+     "bear": "國會祭出更嚴厲調查或出口禁令升級 ➔ 輝達與舊穀倉 ODM 再遭殺估值",
+     "action": "嚴守水庫二傳家寶不動，短線資金聚焦無墊料之新穀倉1與00985B防彈"},
+    {"date": "2026-12-08", "cat": "FOMC", "short": "12月FOMC決議", "title": "聯準會 FOMC 利率決議與點陣圖（12/08~12/09）", "level": "HIGH",
+     "bull": "升息幅度符合/低於預期且暗示接近終點 ➔ 利空出盡，台股 W 底右腳確立",
+     "bear": "點陣圖上調明年終點利率或超鷹派談話 ➔ 美股破底拖累台股測月36MA",
+     "action": "關鍵轉折點！靜待落底雷達達 4/5 共振再解鎖分 3 批存股龍頭"},
+    {"date": "2026-12-10", "cat": "CPI", "short": "台積營收+美CPI", "title": "台積電 11 月營收 ＋ 美國 11 月 CPI ＋ 商務部長盧特尼克參院作證", "level": "HIGH",
+     "bull": "台積電營收續創高且 CPI 降溫 ➔ 基本面拆彈，外資現貨回補啟動",
+     "bear": "CPI 爆表或商務部加碼晶片管制 ➔ 半導體雙重承壓",
+     "action": "確認 AI 訂單真實續航力，剔除純題材假突破股"},
+    {"date": "2026-12-15", "cat": "IPO", "short": "ANT鎖定解禁", "title": "Anthropic (ANT) 首波早期鎖定期解禁（3.03 億股）", "level": "HIGH",
+     "bull": "大股東惜售或承接買盤強勁 ➔ 美股流動性抽血結束",
+     "bear": "早期投資人獲利了結倒貨 ➔ 拖累美股科技股與 AI 概念股同步回測",
+     "action": "觀察是否砸出 12 月中 W 底右腳黃金買點"},
+    {"date": "2026-12-21", "cat": "BIS", "short": "ANT納那指+BIS", "title": "ANT 快速納入那斯達克 100 生效 ＆ 美 BIS 晶片新規舊約運送截止日", "level": "HIGH",
+     "bull": "被動買盤順利消化解禁籌碼，半導體拉貨回歸常態",
+     "bear": "重演 SpaceX 納入日倒貨潮，加上搶運潮退潮引發 1 月營收真空擔憂",
+     "action": "提防高位階 AI 股趁納入日利多出盡"},
+    {"date": "2027-01-19", "cat": "BIS", "short": "BIS評論截止", "title": "美國 BIS 晶片新規公眾評論截止日", "level": "HIGH",
+     "bull": "美企遊說成功放寬細則 ➔ 先進封測與 CSP 自研晶片迎估值修復",
+     "bear": "新規嚴格定案 ➔ 亞洲供應鏈重新定價",
+     "action": "2027 Q1 出口規範定案關鍵時點"},
+    # 2027 全年官方 FOMC 與 MSCI 預告庫
+    {"date": "2027-01-26", "cat": "FOMC", "short": "27/01 FOMC", "title": "2027年1月 聯準會 FOMC 利率決議 (1/26-1/27)", "level": "HIGH",
+     "bull": "通膨受控釋出暫停升息訊號 ➔ 債市與成長股迎元月行情",
+     "bear": "維持鷹派緊縮立場 ➔ 壓抑 Q1 科技股本益比", "action": "依當下模組0燈號調整水庫水位"},
+    {"date": "2027-02-09", "cat": "MSCI", "short": "MSCI 2月公告", "title": "MSCI 2027年2月季度調整名單公告（3/1 生效）", "level": "MED",
+     "bull": "提前卡位新納入主流族群與指標龍頭", "bear": "剔除股面臨外資被動調降壓力", "action": "於 App Tab 4 貼入最新名單更新觀察池"},
+    {"date": "2027-03-16", "cat": "FOMC", "short": "27/03 FOMC", "title": "2027年3月 聯準會 FOMC 利率決議與點陣圖 (3/16-3/17)", "level": "HIGH",
+     "bull": "點陣圖下修利率路徑 ➔ 啟動波段主升段", "bear": "利率維持高檔更久 ➔ 高估值股面臨修正", "action": "事件前 3 天降槓桿防劇烈甩尾"},
+    {"date": "2027-04-27", "cat": "FOMC", "short": "27/04 FOMC", "title": "2027年4月 聯準會 FOMC 利率決議 (4/27-4/28)", "level": "HIGH",
+     "bull": "政策轉溫和支撐報稅季行情", "bear": "疊加報稅季賣壓放大波動", "action": "檢視第一季財報防墊料與三率體質"},
+    {"date": "2027-05-10", "cat": "MSCI", "short": "MSCI 5月公告", "title": "MSCI 2027年5月半年度調整名單公告（5/28 生效）", "level": "MED",
+     "bull": "半年度大換血帶來新資金主流", "bear": "生效尾盤劇烈震盪", "action": "更新 App MSCI 動態池並提防尾盤爆量"},
+    {"date": "2027-06-08", "cat": "FOMC", "short": "27/06 FOMC", "title": "2027年6月 聯準會 FOMC 利率決議與點陣圖 (6/8-6/9)", "level": "HIGH",
+     "bull": "進入降息討論窗口 ➔ 債券與權值股雙多", "bear": "通膨反覆推遲寬鬆", "action": "檢視水庫三 00985B 債息與資本利得"},
+    {"date": "2027-07-27", "cat": "FOMC", "short": "27/07 FOMC", "title": "2027年7月 聯準會 FOMC 利率決議 (7/27-7/28)", "level": "HIGH",
+     "bull": "資金面寬鬆搭配除權息旺季", "bear": "高檔除息貼息壓力", "action": "多頭綠燈期將股息投入衛星股賺短價差"},
+    {"date": "2027-08-12", "cat": "MSCI", "short": "MSCI 8月公告", "title": "MSCI 2027年8月季度調整名單公告（9/1 生效）", "level": "MED",
+     "bull": "外資針對下半年成長股重新配置", "bear": "弱勢權值股遭調降權重", "action": "同步更新 App MSCI 觀察池"},
+    {"date": "2027-09-14", "cat": "FOMC", "short": "27/09 FOMC", "title": "2027年9月 聯準會 FOMC 利率決議與點陣圖 (9/14-9/15)", "level": "HIGH",
+     "bull": "確立利率下行循環", "bear": "經濟放緩疑慮引發避險", "action": "檢查美債殖利率與 HYG 信用利差"},
+    {"date": "2027-10-26", "cat": "FOMC", "short": "27/10 FOMC", "title": "2027年10月 聯準會 FOMC 利率決議 (10/26-10/27)", "level": "HIGH",
+     "bull": "Q4 旺季作帳啟動", "bear": "年底外資結帳賣壓", "action": "核對第四季旺季營收與庫存"},
+    {"date": "2027-11-11", "cat": "MSCI", "short": "MSCI 11月公告", "title": "MSCI 2027年11月半年度調整名單公告（12/1 生效）", "level": "MED",
+     "bull": "外資布局 2028 新主流賽道", "bear": "剔除股尾盤承壓", "action": "更新 App MSCI 動態池"},
+    {"date": "2027-11-16", "cat": "FOMC", "short": "27/11 FOMC", "title": "2027年11月 聯準會 FOMC 利率決議 (11/16-11/17)", "level": "HIGH",
+     "bull": "政策明朗利於年底行情", "bear": "意外鷹派壓抑風險資產", "action": "嚴守模組 0 雙雷達燈號"}
 ]
 
-def get_upcoming_risk_events():
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> datetime.date:
+    """回傳指定年月第 n 個星期幾 (0=Mon .. 4=Fri)"""
+    cal = calendar.monthcalendar(year, month)
+    days = [wk[weekday] for wk in cal if wk[weekday] != 0]
+    return datetime.date(year, month, days[min(n - 1, len(days) - 1)])
+
+def _last_weekday(year: int, month: int, weekday: int) -> datetime.date:
+    cal = calendar.monthcalendar(year, month)
+    days = [wk[weekday] for wk in cal if wk[weekday] != 0]
+    return datetime.date(year, month, days[-1])
+
+def _shift_workday(d: datetime.date) -> datetime.date:
+    if d.weekday() == 5: return d - datetime.timedelta(days=1)
+    if d.weekday() == 6: return d + datetime.timedelta(days=1)
+    return d
+
+def get_dynamic_rolling_events(horizon_days: int = 90):
+    """
+    自動滾動風險事件簿：合併「官方全年預告庫 ＋ 自動推算未來 90 天每月例行總經/結算日 ＋ 指揮官手動新增事件」，
+    自動過濾過期事件、依剩餘天數排序並去重。
+    """
     today_d = get_tw_now().date()
-    rows, next_ev = [], None
-    for ev in EVENT_CALENDAR_2026_2027:
-        ev_d = datetime.datetime.strptime(ev["date"], "%Y-%m-%d").date()
+    end_d = today_d + datetime.timedelta(days=horizon_days)
+    merged = {}
+
+    def _add_ev(d_str, cat, short_lbl, title, level, bull, bear, action, priority=1):
+        key = (d_str, cat)
+        if key not in merged or priority > merged[key]["_pri"]:
+            merged[key] = {
+                "date": d_str, "cat": cat, "short": short_lbl, "title": title, "level": level,
+                "bull": bull, "bear": bear, "action": action, "_pri": priority
+            }
+
+    # 1. 自動推算未來 4 個月內之固定例行總經與結算日 (priority=1，若官方庫已有同日同類則由官方庫覆蓋)
+    cur_y, cur_m = today_d.year, today_d.month
+    for m_off in range(0, 4):
+        yy = cur_y + (cur_m - 1 + m_off) // 12
+        mm = (cur_m - 1 + m_off) % 12 + 1
+        prev_m_lbl = f"{12 if mm == 1 else mm - 1}月"
+
+        d_nfp = _nth_weekday(yy, mm, 4, 1)
+        _add_ev(d_nfp.strftime("%Y-%m-%d"), "NFP", f"美{prev_m_lbl}非農", f"美國 {prev_m_lbl} 非農就業報告 (NFP)", "HIGH",
+                "就業溫和降溫(金髮女孩) ➔ 減輕升息壓力，利多科技與美債",
+                "就業過熱(薪資飆升)或急凍(衰退恐慌) ➔ 雙向引發高波動",
+                "數據公布前不留高槓桿部位，觀察美債10Y與那指期反應", 1)
+
+        d_tsmc = _shift_workday(datetime.date(yy, mm, 10))
+        _add_ev(d_tsmc.strftime("%Y-%m-%d"), "TSMC", f"台積{prev_m_lbl}營收", f"台積電(2330) {prev_m_lbl} 營收公布（全台月營收截止日）", "MED",
+                "營收優於預期且年增續強 ➔ 驗證 AI 實單需求，提振新穀倉1信心",
+                "月減幅大於季節性預期 ➔ 引發半導體庫存調整擔憂",
+                "搭配 Tab 6 月營收快篩檢視久旱破繭與雙成長標的", 1)
+
+        d_cpi = _nth_weekday(yy, mm, 2, 2)
+        _add_ev(d_cpi.strftime("%Y-%m-%d"), "CPI", f"美{prev_m_lbl}CPI", f"美國 {prev_m_lbl} CPI 消費者物價指數", "HIGH",
+                "核心CPI低於預期 ➔ 殖利率回落、美元轉弱，助外資回補台股",
+                "核心CPI高於預期 ➔ 殺估值壓力重燃，科技股首當其衝",
+                "事件前 3 天嚴禁追高，優先配置防彈衣與 00985B", 1)
+
+        d_settle = _nth_weekday(yy, mm, 2, 3)
+        _add_ev(d_settle.strftime("%Y-%m-%d"), "SETTLE", f"{mm}月期權結算", f"台指期與選擇權 {mm} 月合約結算日", "MED",
+                "外資空單獲利了結順勢回補轉倉 ➔ 結算後盤勢止跌反彈",
+                "外資壓低結算並將巨額空單轉倉至下月 ➔ 尾盤 13:00-13:30 劇烈下殺",
+                "緊盯 13:00 尾盤震盪與盤後外資新月份未平倉淨空單變化", 1)
+
+        d_pce = _last_weekday(yy, mm, 4)
+        _add_ev(d_pce.strftime("%Y-%m-%d"), "PCE", f"美{prev_m_lbl}PCE", f"美國 {prev_m_lbl} PCE 個人消費支出物價指數", "HIGH",
+                "Fed 最重視之通膨指標降溫 ➔ 強化鴿派預期，股債齊揚",
+                "核心PCE反彈 ➔ 壓抑降息空間，美債殖利率上衝",
+                "留意殖利率是否突破 5.0% 觸發外資利差提款警戒", 1)
+
+        if mm in [3, 6, 9, 12]:
+            d_qw = _nth_weekday(yy, mm, 4, 3)
+            _add_ev(d_qw.strftime("%Y-%m-%d"), "QW", f"{mm}月美股四巫日", f"美股 {mm} 月四巫日 (期貨/選擇權季度結算)", "MED",
+                    "選擇權賣權結算消散，流動性釋放助美股反彈",
+                    "CTA 與選擇權 Gamma 擠壓放大盤中單日 2%~3% 劇烈振幅",
+                    "美股結算夜前不輕易滿倉追價", 1)
+
+    # 2. 合併官方全年度預告與特定催化劑 (priority=2)
+    for ev in OFFICIAL_ANCHOR_EVENTS:
+        _add_ev(ev["date"], ev["cat"], ev["short"], ev["title"], ev["level"], ev["bull"], ev["bear"], ev["action"], 2)
+
+    # 3. 合併指揮官手動新增之自訂事件 (priority=3)
+    if os.path.exists(CUSTOM_EVENTS_FILE):
+        try:
+            with open(CUSTOM_EVENTS_FILE, "r", encoding="utf-8") as f:
+                for ce in json.load(f):
+                    _add_ev(ce["date"], "CUSTOM", ce.get("short", "自訂事件"), ce["title"], ce.get("level", "HIGH"),
+                            ce.get("bull", "利多實現帶動反彈"), ce.get("bear", "不如預期引發回檔"), ce.get("action", "嚴控倉位"), 3)
+        except Exception:
+            pass
+
+    rows = []
+    upcoming_rows = []
+    for item in merged.values():
+        try:
+            ev_d = datetime.datetime.strptime(item["date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
         delta_days = (ev_d - today_d).days
-        status = "✅ 已度過" if delta_days < 0 else (f"🚨 今日登場！" if delta_days == 0 else (f"🔴 倒數 {delta_days} 天 (高波動警戒)" if delta_days <= 3 else (f"🟡 倒數 {delta_days} 天" if delta_days <= 7 else f"📅 尚餘 {delta_days} 天")))
-        item = {"日期": ev["date"], "倒數狀態": status, "重大風險事件": ev["title"], "實戰防禦提醒": ev["action"], "_days": delta_days, "_level": ev["level"]}
-        rows.append(item)
-        if delta_days >= 0 and next_ev is None:
-            next_ev = item
-    return rows, next_ev
+        if delta_days < -3 or ev_d > end_d:
+            continue
+        status = "✅ 已度過" if delta_days < 0 else ("🚨 今日登場！" if delta_days == 0 else (f"🔴 倒數 {delta_days} 天 (高波動警戒)" if delta_days <= 3 else (f"🟡 倒數 {delta_days} 天" if delta_days <= 7 else f"📅 尚餘 {delta_days} 天")))
+        row_obj = {
+            "日期": item["date"], "倒數狀態": status, "重大風險事件": item["title"],
+            "🟢 優於預期／鴿派劇本": item["bull"], "🔴 差於預期／鷹派劇本": item["bear"],
+            "🛡️ 實戰因應": item["action"],
+            "_short": item["short"], "_days": delta_days, "_level": item["level"]
+        }
+        rows.append(row_obj)
+        if delta_days >= 0:
+            upcoming_rows.append(row_obj)
+
+    rows.sort(key=lambda x: (x["_days"], 0 if x["_level"] == "HIGH" else 1))
+    upcoming_rows.sort(key=lambda x: (x["_days"], 0 if x["_level"] == "HIGH" else 1))
+    next_ev = upcoming_rows[0] if upcoming_rows else None
+    return rows, upcoming_rows, next_ev
 
 # ==========================================
-# 模組四：MSCI 每季動態自動更新引擎 ＋ 證交所處置股查核
+# 模組四：MSCI 每季動態自動更新引擎 ＋ 處置股查核 (修正 Bug 4 排除電腦週邊設備誤抓)
 # ==========================================
 MSCI_CACHE_FILE = "msci_dynamic_cache.json"
 TDCC_PREV_CACHE_FILE = "tdcc_prev_snapshot.json"
@@ -164,12 +321,20 @@ def fetch_twse_disposition_codes():
     return disp_map
 
 def infer_msci_theme(code: str, name: str, sector_str: str = "") -> str:
+    """精準對應 MSCI 細分族群，明確排除『電腦及週邊設備』誤入先進封測設備"""
     s = f"{name} {sector_str}"
-    if code in ["3189", "8046", "6274", "6672", "3037", "2383", "2368"] or any(k in s for k in ["載板", "CCL", "銅箔", "PCB"]): return "ABF載板與高頻CCL"
-    if code in ["6683", "7822", "8021", "6515", "6223", "3711", "6239", "3264"] or any(k in s for k in ["封測", "探針", "檢測", "設備"]): return "先進封測介面設備"
-    if code in ["3163", "4991", "3016", "3363", "3450", "6442"] or any(k in s for k in ["光通訊", "矽光子", "網通", "磊晶"]): return "CPO矽光子與光通訊"
-    if code in ["3693", "7711", "3026", "6173", "2327", "3661", "3443"] or any(k in s for k in ["伺服器", "被動", "準系統", "ASIC"]): return "ASIC準系統與高壓被動"
-    if code in ["2615", "2603", "2609"] or "航運" in s: return "貨櫃航運"
+    if code in ["3189", "8046", "6274", "6672", "3037", "2383", "2368"] or any(k in s for k in ["載板", "CCL", "銅箔", "PCB"]):
+        return "ABF載板與高頻CCL"
+    if code in ["6683", "7822", "8021", "6515", "6223", "3711", "6239", "3264", "6187", "3131", "3583", "2449"] or (
+        ("電腦及週邊" not in s) and any(k in s for k in ["封測", "探針", "檢測設備", "半導體設備", "CoWoS", "先進封裝"])
+    ):
+        return "先進封測介面設備"
+    if code in ["3163", "4991", "3016", "3363", "3450", "6442"] or any(k in s for k in ["光通訊", "矽光子", "磊晶"]):
+        return "CPO矽光子與光通訊"
+    if code in ["3693", "7711", "3026", "6173", "2327", "3661", "3443"] or any(k in s for k in ["被動元件", "準系統", "ASIC"]):
+        return "ASIC準系統與高壓被動"
+    if code in ["2615", "2603", "2609"] or "航運" in s:
+        return "貨櫃航運"
     return sector_str or "其他異動族群"
 
 def parse_msci_text_override(raw_text: str, price_dict: dict, quarter_label: str = "使用者自訂最新季度") -> dict:
@@ -227,13 +392,12 @@ def fetch_odm_inventory_ocf_health(codes_tuple):
     for code in codes_tuple:
         if code not in OLD_GRANARY_ODM_WATCH or code in ODM_Q3_OFFICIAL_BASE: continue
         res_s = fetch_single_stock_anti_trap(code, "TW")
-        if res_s.get("ok"):
-            health_map[code] = res_s
+        if res_s.get("ok"): health_map[code] = res_s
     return health_map
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_single_stock_anti_trap(code: str, mkt: str = "TW") -> dict:
-    """Mode B 決選深檢包專用：按需查詢單檔個股季報之存貨QoQ、應收帳款QoQ 與營業現金流 (防逾時 24h 快取)"""
+    """Mode B 決選深檢包專用：按需查詢單檔個股季報之存貨QoQ、應收帳款QoQ 與營業現金流 (24h 快取)"""
     if code in ODM_Q3_OFFICIAL_BASE:
         b = dict(ODM_Q3_OFFICIAL_BASE[code])
         b["ok"] = True
@@ -381,7 +545,7 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
     if curr_p is None or pd.isna(curr_p) or curr_p <= 0:
         return np.nan, np.nan, np.nan, np.nan, "➖ 暫無報價"
 
-    is_fin = ("金融" in sector_str) or (code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834"])
+    is_fin = ("金融" in sector_str) or (code in ["2881", "2882", "2891", "2886", "2884", "2885", "2892", "2880", "5880", "2890", "2883", "2887", "2801", "2834", "2812"])
     if is_fin: pe_low, pe_high = 12.0, 15.5
     elif any(k in sector_str for k in ["IC設計", "矽智財", "散熱", "BMC", "ASIC", "高速傳輸", "CoWoS", "探針", "重電", "矽光子"]) or code in ["2454", "3034", "2379", "3017", "3653", "2059", "5274", "3529", "3661", "3443", "6669", "3324", "5269", "6187", "3131", "6515", "6223", "1519", "6683", "3163", "4991", "7822"]:
         pe_low, pe_high = 20.0, 28.0
@@ -530,16 +694,14 @@ def fetch_us_sectors_and_leaders():
     for etf_sym, _, leaders in US_SECTOR_DEFINITIONS:
         all_syms.append(etf_sym)
         for l_sym, _ in leaders:
-            if l_sym not in all_syms:
-                all_syms.append(l_sym)
+            if l_sym not in all_syms: all_syms.append(l_sym)
 
     quotes_map = {}
     with ThreadPoolExecutor(max_workers=12) as executor:
         fut_map = {executor.submit(fetch_yahoo_v8_realtime, sym, 3): sym for sym in all_syms}
         for fut in as_completed(fut_map):
-            sym_k = fut_map[fut]
             res_q = fut.result()
-            if res_q: quotes_map[sym_k] = res_q
+            if res_q: quotes_map[fut_map[fut]] = res_q
 
     tnx_q = quotes_map.get("%5ETNX", {})
     tnx_raw = tnx_q.get("close", 4.94)
@@ -609,21 +771,14 @@ def fetch_mis_realtime_batch(code_market_tuples):
     if fx_v8 and fx_v8["close"] > 10.0: rt_dict["USDTWD"] = fx_v8
     return rt_dict
 
-# ==========================================
-# v60.0 新增：全市場當沖率整批抓取 (TWSE TWTB4U ＋ TPEx) & 按需集保大戶週變動
-# ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_day_trade_shares_batch() -> tuple[dict, str]:
-    """整批 2 次請求取得全上市 (TWTB4U) 與全上櫃當沖成交股數，嚴格 5 秒逾時防護與 try-except"""
     headers = {"User-Agent": "Mozilla/5.0"}
     dt_shares = {}
-    dt_note = ""
     now_tw = get_tw_now()
     is_intraday = (now_tw.weekday() < 5) and (540 <= (now_tw.hour * 60 + now_tw.minute) < 960)
-    if is_intraday:
-        dt_note = "(前日)"
+    dt_note = "(前日)" if is_intraday else ""
 
-    # 1. 上市 TWSE TWTB4U (OpenAPI 優先，失敗則回溯 3 個交易日抓 RWD JSON)
     twse_ok = False
     try:
         r_tw = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/TWTB4U", headers=headers, timeout=5, verify=False)
@@ -634,8 +789,7 @@ def fetch_day_trade_shares_batch() -> tuple[dict, str]:
                 if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit():
                     dt_shares[c] = float(v_raw)
             twse_ok = True
-    except Exception:
-        pass
+    except Exception: pass
 
     if not twse_ok:
         for d_back in range(0, 4):
@@ -648,15 +802,11 @@ def fetch_day_trade_shares_batch() -> tuple[dict, str]:
                     rows = tables[1].get("data", []) if len(tables) >= 2 else r_rw.json().get("data", [])
                     if rows and len(rows) > 50:
                         for row in rows:
-                            c = str(row[0]).strip()
-                            v_raw = str(row[3]).replace(",", "").strip()
-                            if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit():
-                                dt_shares[c] = float(v_raw)
+                            c, v_raw = str(row[0]).strip(), str(row[3]).replace(",", "").strip()
+                            if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit(): dt_shares[c] = float(v_raw)
                         break
-            except Exception:
-                continue
+            except Exception: continue
 
-    # 2. 上櫃 TPEx 當沖統計 (OpenAPI 優先，失敗則抓 intraday_trading_stat_result.php)
     tpex_ok = False
     try:
         r_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_day_trading", headers=headers, timeout=5, verify=False)
@@ -664,11 +814,9 @@ def fetch_day_trade_shares_batch() -> tuple[dict, str]:
             for row in r_otc.json():
                 c = str(row.get("SecuritiesCompanyCode", row.get("Code", ""))).strip()
                 v_raw = str(row.get("DayTradingVolume", row.get("Volume", "0"))).replace(",", "").strip()
-                if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit():
-                    dt_shares[c] = float(v_raw)
+                if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit(): dt_shares[c] = float(v_raw)
             tpex_ok = True
-    except Exception:
-        pass
+    except Exception: pass
 
     if not tpex_ok:
         for d_back in range(0, 4):
@@ -681,25 +829,16 @@ def fetch_day_trade_shares_batch() -> tuple[dict, str]:
                     rows = r_o2.json().get("aaData", [])
                     if rows and len(rows) > 50:
                         for row in rows:
-                            c = str(row[0]).strip()
-                            v_raw = str(row[3]).replace(",", "").strip()
-                            if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit():
-                                dt_shares[c] = float(v_raw)
+                            c, v_raw = str(row[0]).strip(), str(row[3]).replace(",", "").strip()
+                            if len(c) == 4 and c.isdigit() and v_raw.replace(".", "").isdigit(): dt_shares[c] = float(v_raw)
                         break
-            except Exception:
-                continue
-
+            except Exception: continue
     return dt_shares, dt_note
 
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_tdcc_weekly_delta_ondemand(codes_tuple: tuple) -> dict:
-    """
-    針對 Mode A (最多6檔) / Mode B (最多3檔) 匯出時按需抓取最近兩週 400張/千張大戶單週變動%，
-    單次 timeout=3.5s、最多4執行緒、快取12小時，失敗安全回傳 None 絕不卡死！
-    """
     out = {}
     start_d = (get_tw_now() - datetime.timedelta(days=28)).strftime("%Y-%m-%d")
-
     def _one(code):
         try:
             r = requests.get(f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockHoldingSharesPer&data_id={code}&start_date={start_d}", timeout=3.5, verify=False)
@@ -719,20 +858,45 @@ def fetch_tdcc_weekly_delta_ondemand(codes_tuple: tuple) -> dict:
                             p1000_c = float(cur_sub[cur_sub["HoldingSharesLevel"].astype(str).isin(lv1000)]["percent"].sum())
                             p1000_p = float(prv_sub[prv_sub["HoldingSharesLevel"].astype(str).isin(lv1000)]["percent"].sum())
                             if p400_c > 0 and p400_p > 0:
-                                return code, {
-                                    "p400": round(p400_c, 2), "d400": round(p400_c - p400_p, 2),
-                                    "p1000": round(p1000_c, 2), "d1000": round(p1000_c - p1000_p, 2),
-                                    "date": str(d_cur)
-                                }
-        except Exception:
-            pass
+                                return code, {"p400": round(p400_c, 2), "d400": round(p400_c - p400_p, 2), "p1000": round(p1000_c, 2), "d1000": round(p1000_c - p1000_p, 2), "date": str(d_cur)}
+        except Exception: pass
         return code, None
-
     with ThreadPoolExecutor(max_workers=4) as ex:
         for fut in as_completed([ex.submit(_one, c) for c in list(codes_tuple)[:6]]):
             c_k, val = fut.result()
             if val is not None: out[c_k] = val
     return out
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_pair_swap_history(code_sell: str, mkt_sell: str, code_buy: str, mkt_buy: str, p_sell_live: float, p_buy_live: float) -> dict:
+    """
+    【對接淘金客 v24.3 模組 0/18：通用雙股比價換龍頭計算引擎】
+    計算『以幾張 賣出股(code_sell) 換 1張 目標龍頭股(code_buy)』之當下比值 vs 近 240 日常態中位數比值與折價幅度%！
+    折價% = (常態比值 - 當下比值) / 常態比值 * 100%（正值越大代表換入龍頭越划算，>=10%~15% 達豁免門檻）
+    """
+    curr_ratio = round(p_buy_live / max(0.01, p_sell_live), 3)
+    res = {"ok": False, "curr_ratio": curr_ratio, "median_ratio": curr_ratio, "mean_ratio": curr_ratio, "min_ratio": curr_ratio, "max_ratio": curr_ratio, "discount_pct": 0.0}
+    try:
+        t_s = f"{code_sell}.{'TW' if mkt_sell == 'TW' else 'TWO'}"
+        t_b = f"{code_buy}.{'TW' if mkt_buy == 'TW' else 'TWO'}"
+        df_p = yf.download([t_s, t_b], period="1y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
+        if not df_p.empty and t_s in df_p and t_b in df_p:
+            s_c = df_p[t_s]["Close"].dropna()
+            b_c = df_p[t_b]["Close"].dropna()
+            aligned = pd.concat([s_c.rename("s"), b_c.rename("b")], axis=1).dropna()
+            if len(aligned) >= 20:
+                ratios = (aligned["b"] / aligned["s"].replace(0, np.nan)).dropna().values.astype(float)
+                med_r = round(float(np.median(ratios)), 3)
+                mean_r = round(float(np.mean(ratios)), 3)
+                disc = round(((med_r - curr_ratio) / max(0.001, med_r)) * 100.0, 1)
+                res = {
+                    "ok": True, "curr_ratio": curr_ratio, "median_ratio": med_r, "mean_ratio": mean_r,
+                    "min_ratio": round(float(np.min(ratios)), 3), "max_ratio": round(float(np.max(ratios)), 3),
+                    "discount_pct": disc
+                }
+    except Exception:
+        pass
+    return res
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_official_market_data():
@@ -836,7 +1000,6 @@ def fetch_official_market_data():
                         except Exception: continue
         except Exception: pass
 
-    # 注入批次當沖率
     try:
         dt_shares_map, dt_note = fetch_day_trade_shares_batch()
         for code, dt_sh in dt_shares_map.items():
@@ -847,10 +1010,8 @@ def fetch_official_market_data():
                     if 0.0 <= ratio_dt <= 99.9:
                         price_dict[code]["day_trade_str"] = f"{ratio_dt:.1f}%{dt_note}"
                         price_dict[code]["day_trade_num"] = ratio_dt
-    except Exception:
-        pass
+    except Exception: pass
 
-    # 三大法人買賣超 (上市 T86 / 上櫃 3itrade)
     for d_back in range(0, 5):
         chk_dt = now_tw - datetime.timedelta(days=d_back)
         if chk_dt.weekday() >= 5: continue
@@ -907,7 +1068,6 @@ def fetch_official_market_data():
                                 except Exception: pass
         except Exception: pass
 
-    # 集保中心 400張以上 (12~15級) ＋ 1000張以上 (15級) ＆ 本地前週快照比對
     try:
         r_csv = requests.get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", headers=headers, timeout=15, verify=False)
         if r_csv.status_code == 200 and len(r_csv.text) > 500:
@@ -923,19 +1083,15 @@ def fetch_official_market_data():
                 df_tdcc["lvl_clean"] = df_tdcc[col_lvl].str.strip()
                 df_tdcc["pct_num"] = pd.to_numeric(df_tdcc[col_pct].str.replace(",", ""), errors="coerce").fillna(0.0)
 
-                df_400 = df_tdcc[df_tdcc["lvl_clean"].isin(["12", "13", "14", "15"])]
-                g400 = df_400.groupby("code_clean")["pct_num"].sum().to_dict()
+                g400 = df_tdcc[df_tdcc["lvl_clean"].isin(["12", "13", "14", "15"])].groupby("code_clean")["pct_num"].sum().to_dict()
                 tdcc_dict = {str(k): round(float(v), 2) for k, v in g400.items() if 0.0 < float(v) <= 100.0}
-
-                df_1000 = df_tdcc[df_tdcc["lvl_clean"] == "15"]
-                g1000 = df_1000.groupby("code_clean")["pct_num"].sum().to_dict()
+                g1000 = df_tdcc[df_tdcc["lvl_clean"] == "15"].groupby("code_clean")["pct_num"].sum().to_dict()
                 tdcc_1000_map = {str(k): round(float(v), 2) for k, v in g1000.items() if 0.0 < float(v) <= 100.0}
 
                 prev_snap = {}
                 if os.path.exists(TDCC_PREV_CACHE_FILE):
                     try:
-                        with open(TDCC_PREV_CACHE_FILE, "r", encoding="utf-8") as f:
-                            prev_snap = json.load(f)
+                        with open(TDCC_PREV_CACHE_FILE, "r", encoding="utf-8") as f: prev_snap = json.load(f)
                     except Exception: prev_snap = {}
 
                 if cur_tdcc_date and prev_snap.get("cur_date") and prev_snap.get("cur_date") != cur_tdcc_date:
@@ -943,26 +1099,18 @@ def fetch_official_market_data():
                     prev_snap["prev_400"] = prev_snap.get("cur_400", {})
                     prev_snap["prev_1000"] = prev_snap.get("cur_1000", {})
 
-                prev_400 = prev_snap.get("prev_400", {})
-                prev_1000 = prev_snap.get("prev_1000", {})
-
+                prev_400, prev_1000 = prev_snap.get("prev_400", {}), prev_snap.get("prev_1000", {})
                 for c_k, v400 in tdcc_dict.items():
                     if c_k in price_dict:
                         v1000 = tdcc_1000_map.get(c_k, None)
                         price_dict[c_k]["tdcc_1000"] = v1000
-                        if c_k in prev_400:
-                            price_dict[c_k]["tdcc_400_delta"] = round(v400 - float(prev_400[c_k]), 2)
-                        if v1000 is not None and c_k in prev_1000:
-                            price_dict[c_k]["tdcc_1000_delta"] = round(v1000 - float(prev_1000[c_k]), 2)
+                        if c_k in prev_400: price_dict[c_k]["tdcc_400_delta"] = round(v400 - float(prev_400[c_k]), 2)
+                        if v1000 is not None and c_k in prev_1000: price_dict[c_k]["tdcc_1000_delta"] = round(v1000 - float(prev_1000[c_k]), 2)
 
                 if cur_tdcc_date and prev_snap.get("cur_date") != cur_tdcc_date:
                     try:
-                        save_obj = {
-                            "cur_date": cur_tdcc_date, "cur_400": tdcc_dict, "cur_1000": tdcc_1000_map,
-                            "prev_date": prev_snap.get("prev_date", ""), "prev_400": prev_400, "prev_1000": prev_1000
-                        }
                         with open(TDCC_PREV_CACHE_FILE, "w", encoding="utf-8") as f:
-                            json.dump(save_obj, f)
+                            json.dump({"cur_date": cur_tdcc_date, "cur_400": tdcc_dict, "cur_1000": tdcc_1000_map, "prev_date": prev_snap.get("prev_date", ""), "prev_400": prev_400, "prev_1000": prev_1000}, f)
                     except Exception: pass
     except Exception: pass
 
@@ -1167,7 +1315,7 @@ def fetch_auto_derivatives_base(price_dict):
         "fini_tx_oi": -97863, "fini_tx_chg": 650, "sitc_tx_oi": 96500, "sitc_tx_chg": 450, "dealer_tx_chg": -1100,
         "fini_mtx_oi": 4200, "fini_mtx_chg": 320, "sitc_mtx_chg": 0, "dealer_mtx_chg": -500, "retail_mtx_chg": 180,
         "consec_cover_days": 1, "cover_3d_sum": 1800,
-        "pc_ratio": 78.5, "warrant_hedge_yi": -290.16, "official_stock_maint": None, "official_maint_date": "",
+        "pc_ratio": 30.1, "warrant_hedge_yi": -290.16, "official_stock_maint": None, "official_maint_date": "",
         "margin_balance_yi": 4362.0, "margin_chg_yi": -491.4, "margin_2d_chg_yi": -971.7,
         "fut_date": "2026/11/20", "twse_date": ""
     }
@@ -1181,7 +1329,7 @@ def fetch_auto_derivatives_base(price_dict):
             for k_p in ["PutCallOpenInterestRatio", "PutCallOpenInterestRatio%", "PutCallRatio"]:
                 if k_p in last_row and str(last_row[k_p]).strip():
                     val = float(str(last_row[k_p]).replace(",", "").strip())
-                    if 30.0 <= val <= 250.0:
+                    if 10.0 <= val <= 250.0:
                         res["pc_ratio"] = round(val, 1); pcr_fetched = True; break
     except Exception: pass
 
@@ -1197,7 +1345,7 @@ def fetch_auto_derivatives_base(price_dict):
                     last_parts = [p.strip() for p in valid_lines[-1].split(",") if p.strip()]
                     if len(last_parts) >= 7:
                         val_csv = float(last_parts[6].replace("%", ""))
-                        if 30.0 <= val_csv <= 250.0: res["pc_ratio"] = round(val_csv, 1); pcr_fetched = True
+                        if 10.0 <= val_csv <= 250.0: res["pc_ratio"] = round(val_csv, 1); pcr_fetched = True
         except Exception: pass
 
     try:
@@ -1330,9 +1478,6 @@ FINANCIAL_BLUE_CHIPS = {
 CORE_WATCHLIST = {**ELECTRONICS_BLUE_CHIPS, **POLICY_DEFENSE_CHIPS, **FINANCIAL_BLUE_CHIPS}
 CONSTRUCTION_BLACKLIST = {"1808", "2501", "2504", "2505", "2506", "2509", "2511", "2515", "2516", "2520", "2524", "2527", "2528", "2530", "2534", "2535", "2536", "2537", "2538", "2539", "2540", "2542", "2543", "2545", "2546", "2547", "2548", "2597", "5522", "5534", "4113", "5529", "5455", "1439", "9906", "7777", "5523"}
 
-# ==========================================
-# v60.0 升級核心技術指標函式 (全數加裝 try-except 容錯)
-# ==========================================
 def compute_kdj(highs, lows, closes, n=9):
     try:
         k_val, d_val, j_val, k_prev, d_prev, j_prev = 50.0, 50.0, 50.0, 50.0, 50.0, 50.0
@@ -1349,7 +1494,6 @@ def compute_kdj(highs, lows, closes, n=9):
         return 50.0, 50.0, 50.0, 50.0, False
 
 def compute_dmi_and_atr(highs, lows, closes, n=14):
-    """同步計算 Wilder 平滑之 +DI / -DI / ADX(14) 與 ATR%(14)，任何異常回傳安全預設值"""
     try:
         if len(closes) < n + 5:
             return 25.0, 25.0, 20.0, 20.0, False, np.nan
@@ -1363,45 +1507,37 @@ def compute_dmi_and_atr(highs, lows, closes, n=14):
         minus_di = 100.0 * pd.Series(minus_dm).ewm(alpha=1.0/n, adjust=False).mean() / atr.replace(0, np.nan)
         dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
         adx = dx.fillna(0.0).ewm(alpha=1.0/n, adjust=False).mean()
-        pdi_now = round(float(plus_di.iloc[-1]), 1)
-        mdi_now = round(float(minus_di.iloc[-1]), 1)
+        pdi_now, mdi_now = round(float(plus_di.iloc[-1]), 1), round(float(minus_di.iloc[-1]), 1)
         pdi_prev = float(plus_di.iloc[-2]) if len(plus_di) > 1 else pdi_now
         mdi_prev = float(minus_di.iloc[-2]) if len(minus_di) > 1 else mdi_now
         adx_now = round(float(adx.iloc[-1]), 1)
         adx_prev = round(float(adx.iloc[-2]) if len(adx) > 1 else 20.0, 1)
         dmi_bull = (pdi_now > mdi_now) and (adx_now > adx_prev) and ((pdi_prev <= mdi_prev + 4.0) or (pdi_now - mdi_now > pdi_prev - mdi_prev))
-        atr_val = float(atr.iloc[-1])
-        curr_c = float(c.iloc[-1])
+        atr_val, curr_c = float(atr.iloc[-1]), float(c.iloc[-1])
         atr_pct = round((atr_val / curr_c) * 100.0, 2) if (pd.notna(atr_val) and curr_c > 0) else np.nan
         return pdi_now, mdi_now, adx_now, adx_prev, bool(dmi_bull), atr_pct
     except Exception:
         return np.nan, np.nan, np.nan, np.nan, False, np.nan
 
 def classify_dmi_direction(pdi, mdi, adx, j_val):
-    """Wilder DMI 方向雙檢標籤判定"""
     try:
-        if any(pd.isna(x) for x in [pdi, mdi, adx]):
-            return "N/A", False
+        if any(pd.isna(x) for x in [pdi, mdi, adx]): return "N/A", False
         if adx > 25.0 and pdi > mdi:
             return ("多頭趨勢確立(強勢鈍化)" if (pd.notna(j_val) and j_val > 100.0) else "多頭趨勢確立"), False
         if adx > 25.0 and mdi > pdi:
             return "空頭加速（防高ADX假多頭）", True
-        if adx < 20.0:
-            return "盤整無趨勢", False
+        if adx < 20.0: return "盤整無趨勢", False
         return ("趨勢萌芽(偏多)" if pdi >= mdi else "趨勢萌芽(偏空)"), False
     except Exception:
         return "N/A", False
 
 def compute_obv_trend(closes, volumes):
-    """計算累積 OBV 及其 5日/20日斜率，偵測價創新高但 OBV 未創高之背離"""
     try:
-        if len(closes) < 22 or len(volumes) < 22:
-            return "N/A", False
+        if len(closes) < 22 or len(volumes) < 22: return "N/A", False
         diff_c = np.diff(closes, prepend=closes[0])
         dir_v = np.where(diff_c > 0, volumes, np.where(diff_c < 0, -volumes, 0.0))
         obv = np.cumsum(dir_v)
-        obv_5_slope = float(obv[-1] - obv[-6])
-        obv_20_slope = float(obv[-1] - obv[-21])
+        obv_5_slope, obv_20_slope = float(obv[-1] - obv[-6]), float(obv[-1] - obv[-21])
         p_5_hi, p_20_hi = float(np.max(closes[-5:])), float(np.max(closes[-20:]))
         o_5_hi, o_20_hi = float(np.max(obv[-5:])), float(np.max(obv[-20:]))
         if (p_5_hi >= p_20_hi * 0.995) and (o_5_hi < o_20_hi * 0.995 or obv_5_slope <= 0.0):
@@ -1426,7 +1562,7 @@ def download_historical_klines(yf_tickers_tuple):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def download_fleet_history():
-    tickers = ["^TWII", "^GSPC", "^SOX", "^VIX", "TWD=X", "00400A.TW", "00985B.TW", "00713.TW", "00631L.TW", "AVGO", "NVDA", "SGOV"]
+    tickers = ["^TWII", "^GSPC", "^SOX", "^VIX", "TWD=X", "00400A.TW", "00985B.TW", "00713.TW", "00631L.TW", "3711.TW", "AVGO", "NVDA", "SGOV"]
     try: return yf.download(tickers, period="5y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
     except Exception: return pd.DataFrame()
 
@@ -1436,19 +1572,19 @@ def download_fleet_60m():
     except Exception: return pd.DataFrame()
 
 def get_twii_20d_return(rt_quotes: dict) -> float:
-    """從共用快取取得加權指數近 20 交易日報酬率%，供 scan_all_stocks() 計算 RS_20D"""
     try:
         data = download_fleet_history()
+        now_tw = get_tw_now()
+        is_open_today = (now_tw.weekday() < 5) and ((now_tw.hour * 60 + now_tw.minute) >= 540)
         if not data.empty and "^TWII" in data:
             c_arr = data["^TWII"]["Close"].dropna().values.astype(float)
             if len(c_arr) >= 21:
-                rt_c = rt_quotes.get("t00", {}).get("close", 0.0)
-                curr_tw = float(rt_c) if (rt_c and rt_c > 0) else float(c_arr[-1])
+                rt_t00 = rt_quotes.get("t00", {})
+                use_rt = is_open_today and rt_t00.get("close", 0) > 0 and rt_t00.get("date") == now_tw.strftime("%Y%m%d")
+                curr_tw = float(rt_t00["close"]) if use_rt else float(c_arr[-1])
                 base_20 = float(c_arr[-21])
-                if base_20 > 0:
-                    return round(((curr_tw - base_20) / base_20) * 100.0, 2)
-    except Exception:
-        pass
+                if base_20 > 0: return round(((curr_tw - base_20) / base_20) * 100.0, 2)
+    except Exception: pass
     return 0.0
 
 def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
@@ -1460,7 +1596,8 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
     data, data_60m = download_fleet_history(), download_fleet_60m()
     now_tw = get_tw_now()
     today_str = now_tw.strftime("%Y-%m-%d")
-    is_market_open_or_after = (now_tw.hour * 60 + now_tw.minute) >= 540
+    today_ymd = now_tw.strftime("%Y%m%d")
+    is_market_open_or_after = (now_tw.weekday() < 5) and ((now_tw.hour * 60 + now_tw.minute) >= 540)
 
     limit_down_cnt = sum(1 for c, inf in price_dict.items() if len(c) == 4 and c.isdigit() and float(inf.get("chg_pct", 0.0)) <= -9.4)
 
@@ -1468,9 +1605,10 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
     twii_chg_pct = twii_official["chg_pct"] if twii_official["close"] > 0 else -6.23
     twii_open = twii_high = twii_low = twii_prev_c = twii_now
     ma5, ma10, ma20, ma60, ma120, ma240 = 38500.0, 40500.0, 42800.0, 44900.0, 45000.0, 39150.0
-    w_ma10, m_ma5, m_ma20, m_ma36 = 43500.0, 42800.0, 33746.0, 30370.0
+    w_ma10, m_ma5, m_ma20, m_ma36 = 43500.0, 42800.0, 33746.0, 28096.0
     twii_30d_high, twii_60d_high, twii_30d_dd_pct = 49822.0, 49822.0, 27.68
     twii_vol_20ma_ratio, twii_lower_shadow_ratio, twii_close_above_low_pct, is_climax_hammer = 1.15, 0.4, 0.5, False
+    twii_consec_above_ma10 = 0
     ma5_prev, ma10_prev, ma20_prev, ma60_prev, ma120_prev, ma240_prev = ma5, ma10, ma20, ma60, ma120, ma240
     deduct_5d, deduct_10d, deduct_20d, deduct_60d, deduct_120d = ma5, ma10, ma20, ma60, ma120
     bb_upper, bb_lower = 47500.0, 34500.0
@@ -1486,11 +1624,12 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
     sox_now, sox_150d_high, sox_dd_pct, sox_ma240 = 8408.6, 14655.0, 42.6, 10200.0
 
     etf_metrics = {
-        "00400A": {"p": 9.80, "ma10": 11.20, "ma20": 12.10, "exit_t1": 10.80, "exit_t2": 11.50, "div_latest": 0.06, "div_ttm": 0.60},
-        "00985B": {"p": 10.36, "ma20": 10.35, "div_latest": 0.053, "div_ttm": 0.596},
+        "00400A": {"p": 10.31, "ma10": 11.40, "ma20": 12.20, "exit_t1": 10.85, "exit_t2": 11.65, "div_latest": 0.06, "div_ttm": 0.60},
+        "00985B": {"p": 10.39, "ma20": 10.35, "div_latest": 0.053, "div_ttm": 0.596},
         "00713": {"p": 58.00, "ma20": 59.50, "div_latest": 1.25, "div_ttm": 3.81},
         "00631L": {"p": 25.50, "ma5": 28.00, "ma20": 31.50},
-        "AVGO": {"p": 304.41}, "NVDA": {"p": 125.53}, "SGOV": {"p": 100.72}
+        "3711": {"p": 482.0, "ma5": 470.0, "ma20": 505.0},
+        "AVGO": {"p": 304.41}, "NVDA": {"p": 125.53}, "SGOV": {"p": 100.64}
     }
 
     try:
@@ -1499,20 +1638,25 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
             if len(df_twii) >= 35:
                 o_twii, c_twii, h_twii, l_twii, v_twii = df_twii["Open"].values.astype(float), df_twii["Close"].values.astype(float), df_twii["High"].values.astype(float), df_twii["Low"].values.astype(float), df_twii["Volume"].values.astype(float)
                 last_k_date = df_twii.index[-1].strftime("%Y-%m-%d")
-                if "t00" in rt_quotes and rt_quotes["t00"]["close"] > 0 and (is_market_open_or_after or abs(rt_quotes["t00"]["chg_pct"]) > 0.01):
-                    rt_t00 = rt_quotes["t00"]
-                    if last_k_date == today_str or (not is_market_open_or_after):
+                rt_t00 = rt_quotes.get("t00", {})
+                # 嚴格跨日防呆 (根除 Bug 1)：僅於 09:00 開盤後且即時報價日期為今日才套用即時點位，盤前強制鎖定前一完整交易日！
+                can_use_rt_t00 = is_market_open_or_after and (rt_t00.get("close", 0) > 0) and (rt_t00.get("date") == today_ymd)
+
+                if can_use_rt_t00:
+                    if last_k_date == today_str:
                         o_twii[-1] = rt_t00["open"] if rt_t00.get("open", 0) > 0 else o_twii[-1]
                         c_twii[-1], h_twii[-1], l_twii[-1] = rt_t00["close"], max(h_twii[-1], rt_t00["high"]), min(l_twii[-1], rt_t00["low"])
                     else:
                         o_twii = np.append(o_twii, rt_t00["open"] if rt_t00.get("open", 0) > 0 else rt_t00["close"])
                         c_twii, h_twii, l_twii, v_twii = np.append(c_twii, rt_t00["close"]), np.append(h_twii, rt_t00["high"]), np.append(l_twii, rt_t00["low"]), np.append(v_twii, v_twii[-1])
-                    twii_chg_pct, twii_prev_c = rt_t00["chg_pct"], rt_t00.get("prev_close", float(c_twii[-2]))
+                    twii_prev_c = float(c_twii[-2]) if len(c_twii) > 1 else rt_t00.get("prev_close", float(c_twii[-1]))
+                    twii_chg_pct = round(((float(c_twii[-1]) - twii_prev_c) / max(1.0, twii_prev_c)) * 100.0, 2)
                     date_str, quote_src = f"{today_str} {rt_t00['time']}", f"🟢 證交所 MIS ＆ Yahoo v8 雙源即時對時 ({rt_t00['time']})"
                 else:
                     twii_prev_c = float(c_twii[-2]) if len(c_twii) > 1 else float(c_twii[-1])
-                    twii_chg_pct = round((float(c_twii[-1]) - twii_prev_c) / twii_prev_c * 100, 2)
-                    date_str = last_k_date
+                    twii_chg_pct = round(((float(c_twii[-1]) - twii_prev_c) / max(1.0, twii_prev_c)) * 100.0, 2)
+                    date_str = f"{last_k_date} 收盤"
+                    quote_src = f"📦 盤前／休市回溯前一交易日完整收盤 ({last_k_date})"
 
                 twii_open, twii_now, twii_high, twii_low = round(float(o_twii[-1]), 1), round(float(c_twii[-1]), 1), round(float(h_twii[-1]), 1), round(float(l_twii[-1]), 1)
                 ma5, ma10, ma20 = round(float(np.mean(c_twii[-5:])), 1), round(float(np.mean(c_twii[-10:])), 1), round(float(np.mean(c_twii[-20:])), 1)
@@ -1529,13 +1673,22 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
                 std20 = float(np.std(c_twii[-20:]))
                 bb_upper, bb_lower = round(ma20 + 2.0 * std20, 1), round(ma20 - 2.0 * std20, 1)
 
+                # 計算連續站穩 10MA 天數 (v24.3 政策逃命波判定依據)
+                ma10_ser = pd.Series(c_twii).rolling(10).mean().values
+                twii_consec_above_ma10 = 0
+                for idx_i in range(len(c_twii) - 1, max(9, len(c_twii) - 15), -1):
+                    if pd.notna(ma10_ser[idx_i]) and c_twii[idx_i] >= ma10_ser[idx_i]:
+                        twii_consec_above_ma10 += 1
+                    else:
+                        break
+
                 twii_30d_high = round(float(np.max(h_twii[-35:])), 1)
                 twii_60d_high = round(float(np.max(h_twii[-65:])), 1) if len(h_twii) >= 65 else twii_30d_high
                 twii_30d_dd_pct = round(((twii_30d_high - twii_now) / max(1.0, twii_30d_high)) * 100.0, 2)
 
                 vol_20ma = float(np.mean(v_twii[-21:-1])) if len(v_twii) >= 21 else max(1.0, float(np.mean(v_twii)))
                 vol_mult_now, _ = get_volume_multiplier()
-                twii_vol_20ma_ratio = round((float(v_twii[-1]) * vol_mult_now) / max(1.0, vol_20ma), 2)
+                twii_vol_20ma_ratio = round((float(v_twii[-1]) * (vol_mult_now if can_use_rt_t00 else 1.0)) / max(1.0, vol_20ma), 2)
                 body_len = max(10.0, abs(twii_now - twii_open))
                 lower_sh = max(0.0, min(twii_now, twii_open) - twii_low)
                 twii_lower_shadow_ratio = round(lower_sh / body_len, 2)
@@ -1560,16 +1713,14 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
             if "^GSPC" in data:
                 c_sp = data["^GSPC"]["Close"].dropna().values.astype(float)
                 if len(c_sp) >= 200:
-                    sp500_now = round(float(c_sp[-1]), 2)
-                    sp500_ma200 = round(float(np.mean(c_sp[-200:])), 2)
+                    sp500_now, sp500_ma200 = round(float(c_sp[-1]), 2), round(float(np.mean(c_sp[-200:])), 2)
                     sp500_below_ma200 = bool(sp500_now < sp500_ma200)
 
             if "^SOX" in data:
                 df_sx = data["^SOX"].dropna(subset=["High", "Close"])
                 if len(df_sx) >= 60:
                     c_sx, h_sx = df_sx["Close"].values.astype(float), df_sx["High"].values.astype(float)
-                    sox_now = round(float(c_sx[-1]), 2)
-                    sox_150d_high = round(float(np.max(h_sx[-150:])), 2)
+                    sox_now, sox_150d_high = round(float(c_sx[-1]), 2), round(float(np.max(h_sx[-150:])), 2)
                     sox_dd_pct = round(((sox_150d_high - sox_now) / max(1.0, sox_150d_high)) * 100.0, 2)
                     sox_ma240 = round(float(np.mean(c_sx[-240:])), 2) if len(c_sx) >= 240 else round(float(np.mean(c_sx)), 2)
 
@@ -1584,26 +1735,23 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
                         fx_now, fx_prev = round(float(c_fx[-1]), 3), round(float(c_fx[-2]), 3) if len(c_fx) >= 2 else round(float(c_fx[-1]), 3)
                     fx_chg_ntd, fx_ma5, fx_ma20 = round(fx_now - fx_prev, 3), round(float(np.mean(c_fx[-5:])), 3), round(float(np.mean(c_fx[-20:])), 3)
 
-            for sym_e, code_e in [("00400A.TW", "00400A"), ("00985B.TW", "00985B"), ("00713.TW", "00713"), ("00631L.TW", "00631L"), ("AVGO", "AVGO"), ("NVDA", "NVDA"), ("SGOV", "SGOV")]:
+            for sym_e, code_e in [("00400A.TW", "00400A"), ("00985B.TW", "00985B"), ("00713.TW", "00713"), ("00631L.TW", "00631L"), ("3711.TW", "3711"), ("AVGO", "AVGO"), ("NVDA", "NVDA"), ("SGOV", "SGOV")]:
                 if sym_e in data:
                     df_e = data[sym_e].dropna(subset=["Close", "High", "Low"])
                     if len(df_e) >= 5:
                         c_e, h_e, l_e = df_e["Close"].values.astype(float), df_e["High"].values.astype(float), df_e["Low"].values.astype(float)
-                        rt_e = rt_quotes.get(code_e, {}).get("close", 0.0)
+                        rt_e = rt_quotes.get(code_e, {}).get("close", 0.0) if is_market_open_or_after else 0.0
                         if rt_e and rt_e > 0: c_e[-1] = float(rt_e)
                         elif code_e in price_dict and price_dict[code_e].get("close", 0) > 0: c_e[-1] = float(price_dict[code_e]["close"])
                         p_e = round(float(c_e[-1]), 2)
                         etf_metrics[code_e]["p"] = p_e
                         if code_e == "00400A" and len(c_e) >= 20:
                             m10_e, m20_e = round(float(np.mean(c_e[-10:])), 2), round(float(np.mean(c_e[-20:])), 2)
-                            hi20, lo20 = float(np.max(h_e[-20:])), float(np.min(l_e[-20:]))
-                            fib382, fib500 = round(lo20 + (hi20 - lo20) * 0.382, 2), round(lo20 + (hi20 - lo20) * 0.500, 2)
-                            etf_metrics["00400A"].update({
-                                "ma10": m10_e, "ma20": m20_e,
-                                "exit_t1": round(max(p_e * 1.05, min(m10_e, fib382)), 2),
-                                "exit_t2": round(max(p_e * 1.10, max(m20_e, fib500)), 2)
-                            })
-                        elif code_e in ["00985B", "00713", "00631L"] and len(c_e) >= 20:
+                            # 務實急殺反彈收斂上限：避免遠離現價 30% 錯過逃命波
+                            t1_val = round(max(p_e * 1.04, min(m10_e, p_e * 1.10)), 2)
+                            t2_val = round(max(t1_val + 0.40, min(m20_e, p_e * 1.18)), 2)
+                            etf_metrics["00400A"].update({"ma10": m10_e, "ma20": m20_e, "exit_t1": t1_val, "exit_t2": t2_val})
+                        elif code_e in ["00985B", "00713", "00631L", "3711"] and len(c_e) >= 20:
                             etf_metrics[code_e]["ma5"] = round(float(np.mean(c_e[-5:])), 2)
                             etf_metrics[code_e]["ma20"] = round(float(np.mean(c_e[-20:])), 2)
     except Exception: pass
@@ -1642,6 +1790,7 @@ def fetch_and_analyze_fleet(rt_quotes, price_dict_all=None):
         "twii_30d_high": twii_30d_high, "twii_60d_high": twii_60d_high, "twii_30d_dd_pct": twii_30d_dd_pct,
         "twii_vol_20ma_ratio": twii_vol_20ma_ratio, "twii_lower_shadow_ratio": twii_lower_shadow_ratio,
         "twii_close_above_low_pct": twii_close_above_low_pct, "is_climax_hammer": is_climax_hammer,
+        "twii_consec_above_ma10": twii_consec_above_ma10,
         "sp500_now": sp500_now, "sp500_ma200": sp500_ma200, "sp500_below_ma200": sp500_below_ma200,
         "sox_now": sox_now, "sox_150d_high": sox_150d_high, "sox_dd_pct": sox_dd_pct, "sox_ma240": sox_ma240,
         "limit_down_cnt": limit_down_cnt,
@@ -1661,6 +1810,7 @@ def scan_all_stocks():
     vol_mult, vol_note = get_volume_multiplier()
     now_tw = get_tw_now()
     today_str = now_tw.strftime("%Y-%m-%d")
+    today_ymd = now_tw.strftime("%Y%m%d")
     is_market_open = (now_tw.weekday() < 5) and ((now_tw.hour * 60 + now_tw.minute) >= 540)
 
     candidates = dict(CORE_WATCHLIST)
@@ -1723,13 +1873,13 @@ def scan_all_stocks():
             last_k_date = df_s.index[-1].strftime("%Y-%m-%d")
             name, sector, mkt_code = candidates[code]
 
-            if code in rt_quotes and rt_quotes[code]["close"] > 0:
-                rt = rt_quotes[code]
+            rt = rt_quotes.get(code, {})
+            if is_market_open and rt.get("close", 0) > 0 and rt.get("date") == today_ymd:
                 if last_k_date == today_str:
                     if rt.get("open", 0) > 0: o[-1] = rt["open"]
                     c[-1], h[-1], l[-1] = rt["close"], max(h[-1], rt["high"]), min(l[-1], rt["low"])
                     if rt["vol_lots"] > 0: v[-1] = float(rt["vol_lots"])
-                elif is_market_open and abs(rt["close"] - rt["prev_close"]) > 0.001:
+                elif abs(rt["close"] - rt["prev_close"]) > 0.001:
                     o = np.append(o, rt["open"] if rt.get("open", 0) > 0 else rt["close"])
                     c, h, l = np.append(c, rt["close"]), np.append(h, rt["high"]), np.append(l, rt["low"])
                     v = np.append(v, float(rt["vol_lots"]) if rt["vol_lots"] > 0 else v[-1])
@@ -1739,7 +1889,7 @@ def scan_all_stocks():
             if abs(chg_1d) < 0.01 and code in price_dict and abs(price_dict[code].get("chg_pct", 0.0)) > 0.01 and not is_market_open:
                 chg_1d = price_dict[code]["chg_pct"]
             chg_3d = round((curr_p - float(c[-4])) / float(c[-4]) * 100, 2) if len(c) >= 4 else chg_1d
-            est_vol = int(round(v[-1] * vol_mult))
+            est_vol = int(round(v[-1] * (vol_mult if is_market_open else 1.0)))
             yest_vol = max(1.0, float(v[-2])) if len(v) >= 2 else max(1.0, float(v[-1]))
             yod_vol_ratio = round(est_vol / yest_vol, 2)
             ma5_vol = max(1.0, float(np.mean(v[-6:-1])))
@@ -1773,17 +1923,15 @@ def scan_all_stocks():
             prev_ma5, prev_ma10, prev_ma20 = float(np.mean(c[-6:-1])), float(np.mean(c[-11:-1])), float(np.mean(c[-21:-1]))
             ma_tangle_pct = round((max(prev_ma5, prev_ma10, prev_ma20) - min(prev_ma5, prev_ma10, prev_ma20)) / max(0.1, prev_ma20) * 100, 2)
 
-            # [新指標 1 & 5] Wilder DMI 方向雙檢 ＋ ATR% 波動尺
             stk_k9, stk_d9, stk_j9, stk_j_prev, kd_cross_recent = compute_kdj(h[-60:], l[-60:], c[-60:])
             stk_j_up = stk_j9 > stk_j_prev
             pdi, mdi, adx, adx_prev, dmi_bull_active, atr_pct = compute_dmi_and_atr(h[-90:], l[-90:], c[-90:])
             dmi_dir_tag, is_bear_accel = classify_dmi_direction(pdi, mdi, adx, stk_j9)
             dmi_full_str = f"+DI:{pdi}/-DI:{mdi}/ADX:{adx} [{dmi_dir_tag}]" if pd.notna(adx) else "N/A"
             atr_str = (f"{atr_pct:.1f}% ⚠️高波動(建議收盤確認/倉位減半)" if atr_pct > 4.5 else f"{atr_pct:.1f}%") if pd.notna(atr_pct) else "N/A"
-            adx_delta, adx_up = (round(adx - adx_prev, 1), adx > adx_prev) if pd.notna(adx) else (0.0, False)
+            adx_up = (adx > adx_prev) if pd.notna(adx) else False
             kd_dmi_resonance = (stk_k9 >= stk_d9) and pd.notna(pdi) and (pdi > mdi) and adx_up and (adx >= 18.0) and (kd_cross_recent or dmi_bull_active)
 
-            # [新指標 2] BIAS 乖離率追高煞車 (固定兩段式：> +10% 黃燈⚠️追高過熱 / > +12% 紅燈🚨極度過熱)
             try:
                 bias_10 = round(((curr_p - ma10) / ma10) * 100.0, 1) if ma10 > 0 else np.nan
                 bias_20 = round(((curr_p - ma20) / ma20) * 100.0, 1) if ma20 > 0 else np.nan
@@ -1795,7 +1943,6 @@ def scan_all_stocks():
             except Exception:
                 bias_10, bias_20, bias10_str, bias20_str = np.nan, np.nan, "N/A", "N/A"
 
-            # [新指標 3] 上影線% × 收盤位階% × 當沖率% (假突破三合一防呆)
             try:
                 day_range = float(h[-1] - l[-1])
                 if day_range < 1e-6:
@@ -1809,8 +1956,7 @@ def scan_all_stocks():
                 upper_sh_pct, close_pos_pct, close_pos_str = np.nan, np.nan, "N/A"
             day_trade_str = p_meta.get("day_trade_str", "N/A (交由淘金客聯網查核)")
 
-            # [新指標 4] OBV 趨勢 × RS_20D 相對大盤強度 × 400/千張大戶週變動
-            obv_tag, is_obv_div = compute_obv_trend(c[-60:], v[-60:])
+            obv_tag, _ = compute_obv_trend(c[-60:], v[-60:])
             try:
                 if len(c) >= 21 and c[-21] > 0:
                     stk_20d_ret = ((curr_p - float(c[-21])) / float(c[-21])) * 100.0
@@ -1824,8 +1970,7 @@ def scan_all_stocks():
 
             tdcc_400 = tdcc_dict.get(code, None)
             tdcc_1000 = p_meta.get("tdcc_1000", None)
-            d400 = p_meta.get("tdcc_400_delta", None)
-            d1000 = p_meta.get("tdcc_1000_delta", None)
+            d400, d1000 = p_meta.get("tdcc_400_delta", None), p_meta.get("tdcc_1000_delta", None)
             if tdcc_400 is not None:
                 s400 = f"{tdcc_400:.1f}%" + (f"({d400:+.2f}%)" if d400 is not None else "")
                 s1000 = (f"{tdcc_1000:.1f}%" + (f"({d1000:+.2f}%)" if d1000 is not None else "")) if tdcc_1000 is not None else "N/A"
@@ -1870,7 +2015,6 @@ def scan_all_stocks():
                 "單月營收YoY": yoy_str, "累計年營收YoY": cum_yoy_str
             }
 
-            # 完整明細入庫供 Mode A / Mode B 戰情數據包直接提取
             all_scanned_details[code] = {
                 **row_base,
                 "_raw_name": name, "_mkt": mkt_code, "_cb": ("🔥含CB可轉債" if code in cb_set else "➖"),
@@ -1889,7 +2033,6 @@ def scan_all_stocks():
                 base_g_score = 85 + granary_bonus + (4 if curr_p >= ma20 else -3) + (3 if (pd.notna(pdi) and pdi > mdi) else 0) + (3 if (f_lots > 0 or s_lots > 0) else 0)
                 list_granary_audit.append({"穀倉戰略總分": max(30, min(115, base_g_score)), **row_base})
 
-            # 右側多方進場榜：強制排除 is_bear_accel (ADX>25 且 -DI>+DI) 與疑似墊料壓貨股！
             is_heavy_dump = (chg_1d <= -2.0 and vol_ratio >= 1.25) or (chg_1d <= -4.2)
             is_above_ma20_trend = (curr_p >= ma20) and (curr_p >= ma5) and (curr_p >= ma10) and (curr_p >= ma60 or ma20 >= ma60 * 0.94)
             is_true_ma20_breakout = (curr_p >= ma20) and (curr_p >= ma5) and (curr_p >= ma10) and (prev_p < ma20) and (chg_1d >= 3.5) and (vol_ratio >= 1.25 or chg_1d >= 8.5) and pd.notna(pdi) and (pdi > mdi)
@@ -1944,14 +2087,18 @@ def scan_all_stocks():
     df_long_turn = pd.DataFrame(list_tab3_turnaround_or_dip).sort_values(by=["波段總分", "今日%"], ascending=[False, False]) if list_tab3_turnaround_or_dip else pd.DataFrame()
     return df_t1, df_t2, df_t3, df_long_bc, df_long_turn, vol_note, rt_quotes, msci_data, price_dict
     # ==========================================
-# 【v60.0 下半部完整程式碼：淘金客 v24.1 雙腦互補架構（5組接軌指標展示 ＋ 雙模式一鍵複製戰情包）】
-# 直接貼在 scan_all_stocks() 的 return 那一行正下方 (上半部維持 v60.0 不動！)
+# 【v61.0 下半部完整程式碼：對接淘金客 v24.3 雙核防禦 ＋ 滾動事件時間軸 ＋ 11/23最新持倉與短單分帳 ＋ 通用雙股比價】
+# 直接貼在 scan_all_stocks() 的 return 那一行正下方 (上半部維持 v61.0 不動！)
 # ==========================================
 import base64
 
 def clean_html(raw_html: str) -> str:
     """移除多行 HTML 字串之行首縮排與空行，防止 Streamlit Markdown 誤判為程式碼區塊"""
     return "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
+
+
+def xml_esc(text: str) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def pin_code_name_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -1983,7 +2130,7 @@ def map_tw_theme_cluster(code: str, name: str, sector: str, official_sec: str) -
         return "🛡️ 重電電網與兆元內需基建"
     if code in ["2454", "3034", "3443", "3661", "5274", "3529", "5269", "8016", "6515", "6223"] or any(k in s_all for k in ["IC設計", "矽智財", "ASIC", "BMC", "探針", "測試座"]):
         return "🌟 IC設計與CSP自研晶片測試"
-    if code in ["3711", "6239", "2449", "3264", "6187", "3131", "3583", "6683", "7822", "8021"] or any(k in s_all for k in ["封測", "扇形封裝", "CoWoS", "封裝", "測試"]):
+    if code in ["3711", "6239", "2449", "3264", "6187", "3131", "3583", "6683", "7822", "8021"] or (("電腦及週邊" not in s_all) and any(k in s_all for k in ["封測", "扇形封裝", "CoWoS", "封裝", "檢測設備"])):
         return "🔬 先進封測與介面設備"
     if code in ["2330", "2303", "5347"] or "晶圓" in s_all:
         return "🏭 晶圓代工與半導體"
@@ -2077,56 +2224,122 @@ def format_sector_bold_html(sec_list: list[str], is_up: bool = True) -> str:
     return "".join(out_rows)
 
 
-def evaluate_crash_and_bottom_radar(
-    twii_now, twii_ma240, twii_30d_dd_pct, sp500_below_ma200, vix_now, sox_dd_pct,
-    fini_oi, margin_dd_pct, margin_2d_chg_yi, maint_pct,
+def build_event_timeline_svg_html(upcoming_rows: list[dict]) -> str:
+    """【v61.0 新增：自動滾動風險事件視覺化水平時間軸 SVG 圖（鎖定未來前 6 大事件）】"""
+    evs = upcoming_rows[:6]
+    if not evs:
+        return ""
+    n = len(evs)
+    xs = [100 + i * int(1000 / max(1, n - 1)) for i in range(n)] if n > 1 else [600]
+    nodes_svg = []
+    for i, ev in enumerate(evs):
+        cx = xs[i]
+        d_left = ev["_days"]
+        col = "#ff4d4f" if d_left <= 3 else ("#facc15" if d_left <= 7 else "#38bdf8")
+        bg_box = "#2d1216" if d_left <= 3 else ("#2e2409" if d_left <= 7 else "#122136")
+        d_badge = "今日登場" if d_left == 0 else f"倒數 {d_left} 天"
+        short_lbl = xml_esc(ev["_short"][:11])
+        date_mmdd = xml_esc(ev["日期"][5:])
+        # 交錯上下顯示卡片避免文字重疊
+        if i % 2 == 0:
+            box_y, line_y1, line_y2 = 16, 76, 102
+        else:
+            box_y, line_y1, line_y2 = 132, 114, 132
+        nodes_svg.append(
+            f'<line x1="{cx}" y1="{line_y1}" x2="{cx}" y2="{line_y2}" stroke="{col}" stroke-width="2" stroke-dasharray="3,2"/>'
+            f'<circle cx="{cx}" cy="108" r="9" fill="{col}" stroke="#0f172a" stroke-width="3"/>'
+            f'<rect x="{cx - 86}" y="{box_y}" width="172" height="60" rx="8" fill="{bg_box}" stroke="{col}" stroke-width="1.8"/>'
+            f'<text x="{cx}" y="{box_y + 20}" fill="{col}" font-family="sans-serif" font-size="12.5" font-weight="900" text-anchor="middle">{date_mmdd} ｜ {d_badge}</text>'
+            f'<text x="{cx}" y="{box_y + 44}" fill="#f8fafc" font-family="sans-serif" font-size="13.5" font-weight="800" text-anchor="middle">{short_lbl}</text>'
+        )
+
+    svg_xml = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 208" width="100%" height="auto">
+<rect width="1200" height="208" rx="10" fill="#0b1220" stroke="#334155" stroke-width="1.5"/>
+<line x1="60" y1="108" x2="1140" y2="108" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+<polygon points="1140,101 1158,108 1140,115" fill="#64748b"/>
+{''.join(nodes_svg)}
+</svg>"""
+    b64_svg = base64.b64encode(svg_xml.encode("utf-8")).decode("utf-8")
+    return f'<img src="data:image/svg+xml;base64,{b64_svg}" style="width:100%; height:auto; display:block; border-radius:10px; margin:6px 0 10px 0;" />'
+
+
+def evaluate_crash_and_bottom_radar_v243(
+    twii_now, twii_ma60, twii_ma120, twii_ma240, twii_30d_dd_pct, sp500_below_ma200,
+    vix_now, sox_dd_pct, fini_oi, margin_dd_pct, margin_2d_chg_yi, margin_2d_pct, maint_pct,
     is_climax_hammer, twii_vol_ratio, twii_sh_ratio,
     basis_pts, basis_stabilized, consec_cover_days, cover_3d_sum,
-    limit_down_cnt, had_limit_down_100
+    fx_stopped_dep, limit_down_cnt, had_limit_down_100,
+    ban_active, days_since_ban, consec_above_ma10
 ) -> dict:
-    """【淘金客 v24.1 股災預警與落底判定雙雷達（全動態浮動計算 ＋ 側邊欄覆寫）】"""
+    """
+    【模組 0（對齊淘金客 v24.3）：三階燈號 × 動態相對指標 × 政策逃命波防呆】
+    """
+    fini_tag = f"{fini_oi:+,} 口 【🚨極限對沖】" if fini_oi < -80000 else f"{fini_oi:+,} 口"
     w_items = [
-        (twii_30d_dd_pct >= 12.0, f"① 30日急殺跌速 >= 12%（目前回檔 <b>-{twii_30d_dd_pct:.1f}%</b>）"),
+        (twii_30d_dd_pct >= 12.0, f"① 30日急殺跌速 ≧ 12%（目前回檔 <b>-{twii_30d_dd_pct:.1f}%</b>）"),
         ((twii_now < twii_ma240) or sp500_below_ma200, f"② 長線生命線失守（加權 {'<' if twii_now < twii_ma240 else '>='} 年線{twii_ma240:,.0f} ｜ 標普 {'< 200MA' if sp500_below_ma200 else '>= 200MA'}）"),
-        ((vix_now >= 30.0) or (sox_dd_pct >= 25.0), f"③ 美股恐慌爆表（VIX <b>{vix_now:.2f}</b> ｜ 費半高點跌幅 <b>-{sox_dd_pct:.1f}%</b>）"),
-        (fini_oi < -60000, f"④ 外資期貨重空 > 6萬口（目前淨空單 <b>{fini_oi:+,} 口</b>）"),
+        ((vix_now >= 30.0) or (sox_dd_pct >= 25.0), f"③ 美股恐慌爆表（VIX <b>{vix_now:.2f}</b> ｜ 費半波段跌幅 <b>-{sox_dd_pct:.1f}%</b>）"),
+        (fini_oi < -60000, f"④ 外資期貨重空 &gt; 6萬口（目前淨空單 <b>{fini_tag}</b>）"),
         (margin_dd_pct < twii_30d_dd_pct, f"⑤ 融資減幅尚未追上大盤跌幅（融資減 <b>-{margin_dd_pct:.1f}%</b> vs 大盤跌 <b>-{twii_30d_dd_pct:.1f}%</b>）")
     ]
     w_count = sum(1 for flag, _ in w_items if flag)
     crash_warning_on = (w_count >= 3)
 
+    basis_rate_pct = round((abs(basis_pts) / max(1.0, twii_now)) * 100.0, 2) if basis_pts < 0 else 0.0
+    b1_ok = (margin_dd_pct >= twii_30d_dd_pct) or (margin_2d_chg_yi <= -500.0) or (margin_2d_pct <= -7.0) or (maint_pct <= 150.0)
+    b3_ok = (basis_pts < 0) and (basis_rate_pct >= 0.8) and basis_stabilized
+    b4_ok = (consec_cover_days >= 3) and (cover_3d_sum >= 10000) and fx_stopped_dep
+
     b_items = [
-        ((margin_dd_pct >= twii_30d_dd_pct) or (margin_2d_chg_yi <= -500.0) or (maint_pct <= 155.0), f"① 融資真斷頭清洗（近2日融資 <b>{margin_2d_chg_yi:+.1f}億</b> ｜ 維持率 <b>{maint_pct:.2f}%</b>）"),
-        (is_climax_hammer, f"② 爆量長下影線（量比 <b>{twii_vol_ratio:.2f}x</b>>=1.25x ｜ 下影/實體 <b>{twii_sh_ratio:.2f}x</b>>=1.5x）"),
-        ((basis_pts <= -100.0) and basis_stabilized, f"③ 期現貨恐慌逆價差收斂（逆價差 <b>{basis_pts:+.0f}點</b> ｜ {'已止穩不擴大' if basis_stabilized else '仍擴大恐慌中'}）"),
-        ((consec_cover_days >= 3) and (cover_3d_sum >= 10000), f"④ 外資空單連3日回補 > 1萬口（連補 <b>{consec_cover_days}日</b> ｜ 3日累計 <b>{cover_3d_sum:+,}口</b>）"),
+        (b1_ok, f"① 融資真斷頭（近2日 <b>{margin_2d_chg_yi:+.1f}億 / {margin_2d_pct:+.1f}%</b> ｜ 整戶維持率 <b>{maint_pct:.2f}%</b>）"),
+        (is_climax_hammer, f"② 爆量長下影線（量比 <b>{twii_vol_ratio:.2f}x</b>≧1.25x ｜ 下影/實體 <b>{twii_sh_ratio:.2f}x</b>≧1.5x）"),
+        (b3_ok, f"③ 恐慌逆價差率 ≧ 0.8% 收斂（逆價差 <b>{basis_pts:+.0f}點 / {basis_rate_pct:.2f}%</b> ｜ {'已止穩不擴大' if basis_stabilized else '仍擴大/未確認'}）"),
+        (b4_ok, f"④ 外資空單連3日回補&gt;1萬口＋台幣止貶（連補 <b>{consec_cover_days}日 / {cover_3d_sum:+,}口</b> ｜ 台幣{'已止貶✅' if fx_stopped_dep else '續貶⚠️'}）"),
         (had_limit_down_100 and (limit_down_cnt < 20), f"⑤ 恐慌廣度收斂（當日跌停 <b>{limit_down_cnt} 家</b> {'< 20家達標' if (had_limit_down_100 and limit_down_cnt < 20) else '尚未收斂至<20家'}）")
     ]
     b_count = sum(1 for flag, _ in b_items if flag)
     bottom_confirmed = (b_count >= 4)
 
+    # 政策逃命波防呆：限空令/護盤發布後 10 交易日 (約14日曆天) 內，若落底 < 4/5 且未連 3 日站穩 10MA
+    is_policy_escape_wave = bool(ban_active and (0 <= days_since_ban <= 14) and (not bottom_confirmed) and (consec_above_ma10 < 3))
+
     if crash_warning_on and (not bottom_confirmed):
-        master_state = "LOCKED"
-        master_badge = f"🔴 總開關【紅燈鎖死】（預警 {w_count}/5 觸發・落底僅 {b_count}/5 未達標）"
-        master_action = "嚴禁追買個股與開槓桿！死守水庫二傳家寶底倉、靜待月 20MA 支撐與落底 4/5 共振，僅執行比價換股與逢彈調節 00400A。"
+        master_state = "RED_LOCKED"
+        lamp_short = "🔴紅燈鎖死"
+        master_badge = f"🔴 紅燈未落底【總開關鎖死】（預警 {w_count}/5・落底 {b_count}/5）"
+        master_action = "嚴禁動用新現金追買股票或開槓桿！僅核准三項豁免：(a) 股轉債轉入00985B/00713；(b) 比價折價>=10~15%換龍頭；(c) 淨降倉換強新穀倉1龍頭(獨立分帳破5MA或平衡價即退)。"
     elif crash_warning_on and bottom_confirmed:
-        master_state = "UNLOCKED_DIP"
-        master_badge = f"🟢 總開關【落底解鎖】（預警 {w_count}/5 ＆ 落底共振 {b_count}/5 達標！）"
-        master_action = "解除買進鎖定！開放機動彈藥分 3 批布局新穀倉1共通規格股、2027 MSCI 外資主流股與水庫三防禦部位！"
+        master_state = "BOTTOM_UNLOCKED"
+        lamp_short = "🟢落底解鎖"
+        master_badge = f"🟢 落底確認【總開關解鎖】（預警 {w_count}/5 ＆ 落底共振 {b_count}/5 達標！）"
+        master_action = "正式解封新資金！開放水庫四/機動現金分 3 批加碼新穀倉1龍頭權值股作傳家寶存股，同步啟動 MSCI 主流觀察池！"
+    elif (twii_now < twii_ma60) or (twii_now < twii_ma120):
+        master_state = "YELLOW"
+        lamp_short = "🟡黃燈警戒"
+        master_badge = f"🟡 黃燈前哨警戒（觸及季線/半年線・預警 {w_count}/5）"
+        master_action = "拉高審核門檻禁止追高！優先收網多頭股息衛星股轉現或轉債，僅限防彈衣／新穀倉1且無3日事件雷者小額試單。"
     else:
-        master_state = "NORMAL"
-        master_badge = f"☀️ 總開關【常態開放】（預警 {w_count}/5 安全・順勢篩選操作）"
-        master_action = "非暴力股災環境，依 5 組量化接軌指標與淘金客 v24.1 雙腦守門員機制正常操作。"
+        master_state = "GREEN"
+        lamp_short = "🟢綠燈常態"
+        master_badge = f"🟢 綠燈多頭常態（站穩季半年線・預警 {w_count}/5）"
+        master_action = "正常審核 App 個股訊號，啟動多頭股息衛星循環（嚴守破 10/20MA 或硬停損 -7%~-10% 無條件撤退）。"
 
     return {
         "w_items": w_items, "w_count": w_count, "crash_warning_on": crash_warning_on,
         "b_items": b_items, "b_count": b_count, "bottom_confirmed": bottom_confirmed,
-        "master_state": master_state, "master_badge": master_badge, "master_action": master_action
+        "basis_rate_pct": basis_rate_pct, "is_policy_escape_wave": is_policy_escape_wave,
+        "master_state": master_state, "lamp_short": lamp_short,
+        "master_badge": master_badge, "master_action": master_action
     }
 
 
 def build_dynamic_crash_cycle_svg_html(fleet: dict, radar: dict, etf_m: dict) -> str:
-    """【動態股災四階段週期走勢圖 × 淘金客 v24.1 雙雷達總開關（全浮動均線推算）】"""
+    """
+    【v61.0 精準校準版：動態股災四階段週期走勢圖 × 淘金客 v24.3 三階燈號總開關】：
+    1. 📍現價紅點依實際回檔比例線性插值落於下降斜線，不壓到底部圓點。
+    2. 修正月36MA壓力底區間，杜絕上下限相同。
+    3. 調整 2027 Q1 合理修復斜率並補齊時間刻度標籤。
+    """
     twii_now, hi_60d = fleet["twii_now"], fleet["twii_60d_high"]
     m_ma20, m_ma36, ma20, ma240 = fleet["m_ma20"], fleet["m_ma36"], fleet["ma20"], fleet["ma240"]
 
@@ -2135,90 +2348,124 @@ def build_dynamic_crash_cycle_svg_html(fleet: dict, radar: dict, etf_m: dict) ->
     r1_low = round(min(ma240, fib382_reb, ma20) * 0.985, 0)
     r1_high = round(max(min(ma240, ma20), fib382_reb), 0)
     l2_low, l2_high = round(m_ma20 * 0.985, 0), round(m_ma20 * 1.035, 0)
-    ext_low = round(min(m_ma36, m_ma20 * 0.90), 0)
 
-    if radar["master_state"] == "LOCKED":
-        if twii_now <= m_ma20 * 1.08:
-            curr_x, curr_y, badge_x, badge_y = 335, 255, 335, 195
-            stage_desc = f"📍 目前位於【階段三：恐慌斷頭最高潮尾聲】（現價 {twii_now:,.0f}點 直測月20MA {m_ma20:,.0f}點第一隻腳・11/23 限空令3.0上路）"
-        else:
-            curr_x, curr_y, badge_x, badge_y = 235, 190, 235, 140
-            stage_desc = f"📍 目前位於【階段二：高利率估值重算速殺段】（現價 {twii_now:,.0f}點 跌破年線 {ma240:,.0f}點）"
-        dot_col = "#ff4d4f"
-    elif radar["master_state"] == "UNLOCKED_DIP":
-        curr_x, curr_y, badge_x, badge_y = 695, 252, 695, 192
-        stage_desc = f"📍 目前位於【階段四：落底共振解鎖・W底右腳建倉區】（現價 {twii_now:,.0f}點・開放分 3 批布局）"
-        dot_col = "#00e676"
+    ext_a, ext_b = round(m_ma36, 0), round(m_ma20 * 0.90, 0)
+    if abs(ext_a - ext_b) < 250:
+        ext_lo, ext_hi = round(m_ma36 * 0.98, 0), round(m_ma36 * 1.02, 0)
     else:
-        curr_x, curr_y, badge_x, badge_y = 955, 175, 955, 235
-        stage_desc = f"📍 目前位於【多頭修復主升推進段】（現價 {twii_now:,.0f}點・常態順勢操作）"
+        ext_lo, ext_hi = min(ext_a, ext_b), max(ext_a, ext_b)
+
+    # 依實際跌幅比例動態線性插值計算 📍現價 紅點座標 (起跌點 90,118 -> 月20MA底點 335,268)
+    if radar["master_state"] == "RED_LOCKED":
+        denom = max(100.0, hi_60d - m_ma20)
+        prog = float(np.clip((hi_60d - twii_now) / denom, 0.12, 0.92))
+        curr_x = int(round(90 + (335 - 90) * prog))
+        curr_y = int(round(118 + (268 - 118) * prog))
+        # 將標籤框自動錯開在斜線右上方，確保完全不遮擋圓點或文字
+        badge_x = min(430, curr_x + 105)
+        badge_y = max(128, curr_y - 38)
+        dot_col = "#ff4d4f"
+        stage_desc = f"📍 目前位於【階段三：恐慌斷頭速殺段】（現價 {twii_now:,.0f}點 ｜ 距月20MA {m_ma20:,.0f}點尚餘 {twii_now - m_ma20:+,.0f}點 ｜ 11/23限空令3.0上路）"
+    elif radar["master_state"] == "BOTTOM_UNLOCKED":
+        curr_x, curr_y, badge_x, badge_y = 695, 258, 695, 200
         dot_col = "#00e676"
+        stage_desc = f"📍 目前位於【階段四：落底共振解鎖・W底右腳建倉區】（現價 {twii_now:,.0f}點・開放分 3 批布局）"
+    elif radar["master_state"] == "YELLOW":
+        curr_x, curr_y, badge_x, badge_y = 515, 192, 515, 142
+        dot_col = "#fbbf24"
+        stage_desc = f"📍 目前位於【黃燈警戒震盪區】（現價 {twii_now:,.0f}點・季半年線前哨，收網衛星禁追高）"
+    else:
+        curr_x, curr_y, badge_x, badge_y = 960, 172, 960, 224
+        dot_col = "#00e676"
+        stage_desc = f"📍 目前位於【🟢 綠燈多頭修復主升段】（現價 {twii_now:,.0f}點・常態順勢操作）"
 
     exit_t1, exit_t2 = etf_m["00400A"]["exit_t1"], etf_m["00400A"]["exit_t2"]
+    policy_warn_html = "<br>• <span style='color:#ff8a80;'>⚠️ <b>政策逃命波警示</b>：限空令/護盤後 10 交易日內，落底未達 4/5 且未連 3 日站穩 10MA，所有急彈一律定性為「政策逃命波」！</span>" if radar["is_policy_escape_wave"] else ""
 
-    svg_xml = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" width="100%" height="auto">
-<rect width="1200" height="430" rx="12" fill="#09111a" stroke="#334155" stroke-width="2"/>
-<rect x="25" y="102" width="1150" height="210" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    svg_xml = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 448" width="100%" height="auto">
+<rect width="1200" height="448" rx="12" fill="#09111a" stroke="#334155" stroke-width="2"/>
+<rect x="25" y="102" width="1150" height="206" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
 <line x1="25" y1="150" x2="1175" y2="150" stroke="#1e293b" stroke-width="1" stroke-dasharray="4,4"/>
-<line x1="25" y1="210" x2="1175" y2="210" stroke="#1e293b" stroke-width="1" stroke-dasharray="4,4"/>
-<line x1="25" y1="270" x2="1175" y2="270" stroke="#1e293b" stroke-width="1" stroke-dasharray="4,4"/>
+<line x1="25" y1="208" x2="1175" y2="208" stroke="#1e293b" stroke-width="1" stroke-dasharray="4,4"/>
 <line x1="25" y1="268" x2="1175" y2="268" stroke="#00e676" stroke-width="2" stroke-dasharray="8,5"/>
 <text x="1165" y="262" fill="#00e676" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="end">動態月20MA支撐線：{m_ma20:,.0f}點</text>
-<line x1="25" y1="188" x2="1175" y2="188" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="6,5"/>
-<text x="1165" y="182" fill="#fcd34d" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="end">反彈逃命/減碼反壓帶：{r1_low:,.0f}～{r1_high:,.0f}點</text>
+<line x1="25" y1="192" x2="1175" y2="192" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="6,5"/>
+<text x="1165" y="186" fill="#fcd34d" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="end">反彈逃命/減碼反壓帶：{r1_low:,.0f}～{r1_high:,.0f}點</text>
+
+<!-- 時間刻度軸標籤 -->
+<text x="90" y="302" fill="#94a3b8" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">10月初高點</text>
+<text x="335" y="302" fill="#ff8a80" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">11月底測第一隻腳</text>
+<text x="515" y="302" fill="#fcd34d" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">12月初政策逃命彈</text>
+<text x="695" y="302" fill="#38bdf8" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">12月中W底右腳</text>
+<text x="960" y="302" fill="#6ee7b7" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">2027 Q1築底修復</text>
+
+<!-- 垂直連接引線 -->
 <line x1="90" y1="86" x2="90" y2="118" stroke="#f97316" stroke-width="1.5" stroke-dasharray="3,3"/>
-<line x1="515" y1="86" x2="515" y2="188" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="3,3"/>
-<line x1="960" y1="86" x2="960" y2="145" stroke="#00e676" stroke-width="1.5" stroke-dasharray="3,3"/>
-<line x1="335" y1="268" x2="335" y2="326" stroke="#ff4d4f" stroke-width="1.5" stroke-dasharray="3,3"/>
-<line x1="695" y1="262" x2="695" y2="326" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="3,3"/>
-<line x1="1010" y1="295" x2="1010" y2="326" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3,3"/>
-<polyline points="90,118 220,185 335,268 515,188 695,262 840,210 960,145 1120,122" fill="none" stroke="#f59e0b" stroke-width="4.5" stroke-linejoin="round"/>
-<polyline points="695,262 800,295 920,268" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="5,4"/>
+<line x1="515" y1="86" x2="515" y2="192" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="3,3"/>
+<line x1="960" y1="86" x2="960" y2="172" stroke="#00e676" stroke-width="1.5" stroke-dasharray="3,3"/>
+<line x1="335" y1="268" x2="335" y2="338" stroke="#ff4d4f" stroke-width="1.5" stroke-dasharray="3,3"/>
+<line x1="695" y1="260" x2="695" y2="338" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="3,3"/>
+<line x1="1010" y1="288" x2="1010" y2="338" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3,3"/>
+
+<!-- 校準後之四階段預測折線 (合理修復斜率，不誇張拉回前高) -->
+<polyline points="90,118 335,268 515,192 695,260 835,212 960,172 1120,152" fill="none" stroke="#f59e0b" stroke-width="4.5" stroke-linejoin="round"/>
+<polyline points="695,260 805,288 925,266" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="5,4"/>
+
 <circle cx="90" cy="118" r="7" fill="#f97316" stroke="#fff" stroke-width="2"/>
 <circle cx="335" cy="268" r="8" fill="#ff4d4f" stroke="#fff" stroke-width="2"/>
-<circle cx="515" cy="188" r="8" fill="#f59e0b" stroke="#fff" stroke-width="2"/>
-<circle cx="695" cy="262" r="8" fill="#38bdf8" stroke="#fff" stroke-width="2"/>
-<circle cx="960" cy="145" r="8" fill="#00e676" stroke="#fff" stroke-width="2"/>
+<circle cx="515" cy="192" r="8" fill="#f59e0b" stroke="#fff" stroke-width="2"/>
+<circle cx="695" cy="260" r="8" fill="#38bdf8" stroke="#fff" stroke-width="2"/>
+<circle cx="960" cy="172" r="8" fill="#00e676" stroke="#fff" stroke-width="2"/>
+
+<!-- 精準插值即時雷達紅點 -->
 <line x1="{curr_x}" y1="{curr_y}" x2="{badge_x}" y2="{badge_y}" stroke="{dot_col}" stroke-width="2.5"/>
-<circle cx="{curr_x}" cy="{curr_y}" r="16" fill="{dot_col}" fill-opacity="0.32"/>
-<circle cx="{curr_x}" cy="{curr_y}" r="8" fill="{dot_col}" stroke="#ffffff" stroke-width="3"/>
-<rect x="{badge_x - 95}" y="{badge_y - 16}" width="190" height="30" rx="7" fill="{dot_col}" stroke="#09111a" stroke-width="2.5"/>
-<text x="{badge_x}" y="{badge_y + 5}" fill="#ffffff" font-family="sans-serif" font-size="14" font-weight="900" text-anchor="middle">📍現價 {twii_now:,.0f}點</text>
+<circle cx="{curr_x}" cy="{curr_y}" r="15" fill="{dot_col}" fill-opacity="0.32"/>
+<circle cx="{curr_x}" cy="{curr_y}" r="7.5" fill="{dot_col}" stroke="#ffffff" stroke-width="3"/>
+<rect x="{badge_x - 88}" y="{badge_y - 15}" width="176" height="28" rx="7" fill="{dot_col}" stroke="#09111a" stroke-width="2"/>
+<text x="{badge_x}" y="{badge_y + 4}" fill="#ffffff" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">📍現價 {twii_now:,.0f}點</text>
+
+<!-- 頂部資訊卡 -->
 <rect x="20" y="14" width="215" height="70" rx="7" fill="#16222f" stroke="#f97316" stroke-width="1.5"/>
 <text x="127" y="36" fill="#e2e8f0" font-family="sans-serif" font-size="13" font-weight="bold" text-anchor="middle">波段起跌高點 (近60日高)</text>
 <text x="127" y="58" fill="#fcd34d" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{hi_60d:,.0f} 點</text>
 <text x="127" y="76" fill="#fda4af" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">30日急殺回檔 -{fleet['twii_30d_dd_pct']:.1f}%</text>
+
 <rect x="355" y="14" width="330" height="70" rx="7" fill="#2d1b19" stroke="#f59e0b" stroke-width="2"/>
 <text x="520" y="35" fill="#ffffff" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">⚠️ 反彈遇壓／減碼區 (年線與0.382反壓)</text>
 <text x="520" y="56" fill="#fcd34d" font-family="sans-serif" font-size="14.5" font-weight="900" text-anchor="middle">{r1_low:,.0f} ～ {r1_high:,.0f} 點</text>
-<text x="520" y="75" fill="#fda4af" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">00400A 滾動退場({exit_t1}~{exit_t2}元)轉00985B・禁追高</text>
+<text x="520" y="75" fill="#fda4af" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">00400A 務實滾動退場({exit_t1}~{exit_t2}元)轉00985B</text>
+
 <rect x="780" y="14" width="395" height="70" rx="7" fill="#112a26" stroke="#00e676" stroke-width="1.5"/>
-<text x="977" y="36" fill="#a7f3d0" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">🚀 2027 Q1~Q2 築底完成・外資主流回流段</text>
+<text x="977" y="36" fill="#a7f3d0" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">🚀 2027 Q1 築底修復・外資主流回流段</text>
 <text x="977" y="57" fill="#00e676" font-family="sans-serif" font-size="14.5" font-weight="900" text-anchor="middle">待落底雷達 &gt;= 4/5 解除鎖定後分 3 批進場</text>
-<text x="977" y="76" fill="#6ee7b7" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">聚焦：新穀倉1共通規格 ＋ MSCI 新增主流 ＋ 換股標的</text>
-<rect x="20" y="326" width="380" height="86" rx="7" fill="#2b0f14" stroke="#ff4d4f" stroke-width="2"/>
-<text x="210" y="348" fill="#ff8a80" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">🔥 第一隻腳測試區 (月20MA＋11/23限空令3.0)</text>
-<text x="210" y="372" fill="#fcd34d" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{l1_low:,.0f} ～ {l1_high:,.0f} 點 (月20MA {m_ma20:,.0f})</text>
-<text x="210" y="396" fill="#e2e8f0" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">T+2 斷頭餘波消化｜開板比價換買日月光(比值&gt;=1.18)</text>
-<rect x="425" y="326" width="380" height="86" rx="7" fill="#13283c" stroke="#38bdf8" stroke-width="2"/>
-<text x="615" y="348" fill="#93c5fd" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">🎯 W底右腳二次測底 (12/8 FOMC・12/15 ANT解禁)</text>
-<text x="615" y="372" fill="#6ee7b7" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{l2_low:,.0f} ～ {l2_high:,.0f} 點 (量縮不破前低)</text>
-<text x="615" y="396" fill="#fcd34d" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">雙雷達落底達 4/5 ➔ 動用水庫四(SGOV/現金)與抱現資金重錘</text>
-<rect x="830" y="326" width="345" height="86" rx="7" fill="#16222f" stroke="#94a3b8" stroke-width="1.5"/>
-<text x="1002" y="348" fill="#cbd5e1" font-family="sans-serif" font-size="13.5" font-weight="bold" text-anchor="middle">🛡️ 極端系統性壓力測試底 (動態月36MA)</text>
-<text x="1002" y="372" fill="#fcd34d" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{ext_low:,.0f} ～ {m_ma36:,.0f} 點</text>
-<text x="1002" y="396" fill="#94a3b8" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">僅於美股流動性危機擴大時啟動・死抱傳家寶＋00985B防彈</text>
+<text x="977" y="76" fill="#6ee7b7" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">聚焦：新穀倉1共通規格 ＋ MSCI 新增主流 ＋ 傳家寶龍頭</text>
+
+<!-- 底部資訊卡 -->
+<rect x="20" y="338" width="380" height="88" rx="7" fill="#2b0f14" stroke="#ff4d4f" stroke-width="2"/>
+<text x="210" y="360" fill="#ff8a80" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">🔥 第一隻腳測試區 (月20MA＋11/23限空令3.0)</text>
+<text x="210" y="384" fill="#fcd34d" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{l1_low:,.0f} ～ {l1_high:,.0f} 點 (月20MA {m_ma20:,.0f})</text>
+<text x="210" y="408" fill="#e2e8f0" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">T+2斷頭餘波消化｜紅燈減碼避開09:00-09:10恐慌低點</text>
+
+<rect x="425" y="338" width="380" height="88" rx="7" fill="#13283c" stroke="#38bdf8" stroke-width="2"/>
+<text x="615" y="360" fill="#93c5fd" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">🎯 W底右腳二次測底 (12/8 FOMC・12/15 ANT解禁)</text>
+<text x="615" y="384" fill="#6ee7b7" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{l2_low:,.0f} ～ {l2_high:,.0f} 點 (量縮不破前低)</text>
+<text x="615" y="408" fill="#fcd34d" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">落底達 4/5 ➔ 動用水庫四(SGOV/台幣現金)分3批重錘龍頭</text>
+
+<rect x="830" y="338" width="345" height="88" rx="7" fill="#16222f" stroke="#94a3b8" stroke-width="1.5"/>
+<text x="1002" y="360" fill="#cbd5e1" font-family="sans-serif" font-size="13.5" font-weight="bold" text-anchor="middle">🛡️ 極端系統性壓力測試底 (月36MA區間)</text>
+<text x="1002" y="384" fill="#fcd34d" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">{ext_lo:,.0f} ～ {ext_hi:,.0f} 點</text>
+<text x="1002" y="408" fill="#94a3b8" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">僅於美股流動性危機擴大時啟動・死抱傳家寶＋00985B防彈</text>
 </svg>"""
     b64_svg = base64.b64encode(svg_xml.encode("utf-8")).decode("utf-8")
-    border_col = "#ff4d4f" if radar["master_state"] == "LOCKED" else "#00e676"
+    border_col = "#ff4d4f" if radar["master_state"] == "RED_LOCKED" else ("#fbbf24" if radar["master_state"] == "YELLOW" else "#00e676")
     raw_card = f"""
 <div style="background: linear-gradient(180deg, #0d1520 0%, #16222f 100%); border: 2px solid {border_col}; border-radius: 14px; padding: 16px 20px; margin-bottom: 16px; color: #fff;">
 <div style="text-align:center; font-size:21px; font-weight:900; color:#fcd34d; border-bottom:1px solid rgba(252,211,77,0.3); padding-bottom:7px; margin-bottom:10px;">
-📉 加權指數動態股災四階段週期走勢圖 × 淘金客 v24.1 雙雷達總開關（全浮動均線自動推算）
+📉 加權指數動態股災四階段週期走勢圖 × 淘金客 v24.3 三階燈號總開關（精準插值校準版）
 </div>
 <div style="font-size:15px; font-weight:800; color:#f8fafc; background:rgba(0,0,0,0.35); padding:9px 14px; border-radius:8px; margin-bottom:10px; border-left:4px solid {border_col}; line-height:1.65;">
 • {stage_desc}<br>
-• <b>總開關狀態</b>：{radar['master_badge']} ➔ <span style="color:#ffd54f;">{radar['master_action']}</span>
+• <b>總開關狀態</b>：{radar['master_badge']} ➔ <span style="color:#ffd54f;">{radar['master_action']}</span>{policy_warn_html}
 </div>
 <img src="data:image/svg+xml;base64,{b64_svg}" style="width:100%; height:auto; display:block; border-radius:10px;" />
 </div>
@@ -2227,18 +2474,21 @@ def build_dynamic_crash_cycle_svg_html(fleet: dict, radar: dict, etf_m: dict) ->
 
 
 # ==========================================
-# v60.0 核心：淘金客 v24.1 雙模式戰情數據包組裝函式 (模式A 守門員批次 / 模式B 決選深檢)
+# v61.0 淘金客 v24.3 雙模式戰情數據包組裝函式 (防截斷核對 ＋ 既有持倉連動)
 # ==========================================
-def build_market_outpost_line(fleet: dict, radar: dict, deriv: dict, tnx_val: float, fx_now: float) -> str:
+def build_market_outpost_line_v243(fleet: dict, radar: dict, deriv: dict, tnx_val: float, fx_now: float, ban_active: bool, next_ev: dict) -> str:
     tw = fleet["twii_now"]
     pos_60 = ">=" if tw >= fleet["ma60"] else "<"
     pos_120 = ">=" if tw >= fleet["ma120"] else "<"
     pos_240 = ">=" if tw >= fleet["ma240"] else "<"
+    ban_tag = "限空令生效中(凍結借券賣減看多加分)" if ban_active else "無限空令"
+    esc_tag = "/⚠️政策逃命波" if radar["is_policy_escape_wave"] else ""
+    ev_tag = f"近3日大事件:{next_ev['日期']}{next_ev['_short']}(倒數{next_ev['_days']}天)" if (next_ev and next_ev["_days"] <= 3) else (f"下個事件:{next_ev['日期']}{next_ev['_short']}" if next_ev else "無近事件")
     return (
         f"[大盤前哨] 加權={tw:,.1f}({fleet['twii_chg_pct']:+.2f}%) | "
         f"位階:{pos_60}60MA({fleet['ma60']:,.0f})/{pos_120}120MA({fleet['ma120']:,.0f})/{pos_240}240MA({fleet['ma240']:,.0f})/月20MA({fleet['m_ma20']:,.0f}) | "
-        f"股災雙雷達:預警{radar['w_count']}/5・落底{radar['b_count']}/5({radar['master_state']}) | "
-        f"PCR={deriv['pc_ratio']:.1f}% | ^TNX={tnx_val:.2f}% | USD/TWD={fx_now:.3f}"
+        f"模組0燈號:{radar['lamp_short']}(預警{radar['w_count']}/5・落底{radar['b_count']}/5・逆價差率{radar['basis_rate_pct']:.2f}%{esc_tag}) | "
+        f"{ban_tag} | PCR={deriv['pc_ratio']:.1f}% | ^TNX={tnx_val:.2f}% | TWD={fx_now:.3f} | {ev_tag}"
     )
 
 
@@ -2250,36 +2500,38 @@ def format_tdcc_with_override(d_rec: dict, live_tdcc_map: dict) -> str:
     return d_rec.get("大戶400/千張", "N/A")
 
 
-def build_mode_a_guard_package(codes: list[str], source_label: str, batch_label: str, all_details: dict, outpost_line: str, now_str: str, live_tdcc_map: dict) -> str:
+def build_mode_a_guard_package_v243(codes: list[str], source_label: str, batch_label: str, all_details: dict, outpost_line: str, now_str: str, live_tdcc_map: dict) -> str:
+    valid_codes = [c for c in codes[:6] if c in all_details]
     lines = [
-        f"【淘金客 v24.1｜模式A 守門員快篩批次包（來源：{source_label}｜{batch_label}：共{len(codes)}檔）】({now_str})",
+        f"【淘金客 v24.3｜模式A 守門員快篩批次包（來源：{source_label}｜{batch_label}｜實附 {len(valid_codes)} 檔，核對無漏檔）】({now_str})",
         outpost_line
     ]
-    for idx, c in enumerate(codes[:6], 1):
-        r = all_details.get(c)
-        if not r: continue
+    for idx, c in enumerate(valid_codes, 1):
+        r = all_details[c]
         tdcc_s = format_tdcc_with_override(r, live_tdcc_map)
         up_sh = f"{r['上影線%']:.1f}%" if pd.notna(r.get("上影線%")) else "N/A"
         lines.append(
             f"{idx}. {c} {r['_raw_name']} | {r['現價']}({r['今日%']:+.2f}%/3日{r['3日%']:+.2f}%) | "
             f"型態:{r.get('_pattern_tag', r['短線屬性'])} | "
-            f"DMI:{r['DMI方向雙檢']} J={r['日J值']} | "
-            f"BIAS10={r['BIAS10']} | "
+            f"DMI:{r['DMI方向雙檢']} J={r['日J值']} | BIAS10={r['BIAS10']} | "
             f"量比{r['5MA量比']}x/上影{up_sh}/位階{r['收盤位階']}/當沖{r['當沖率']} | "
             f"OBV:{r['OBV趨勢']}/RS20D:{r['RS20D%']}/大戶:{tdcc_s} | "
             f"ATR%={r['ATR%波動尺']} | 月營收YoY={r['單月營收YoY']}"
         )
-    lines.append("➔ 請執行【淘金客 v24.1 模式A 守門員快篩】：直接剔除地雷／假突破／墊料風險股，篩出值得進入模式B深檢的 Top 1~3 檔！")
+    lines.append(f"[批次結尾核對：實附 {len(valid_codes)} 檔完畢] ➔ 請執行【淘金客 v24.3 模式A 守門員快篩】：集中聯網補查六大死因（處置殭屍／當沖假突破／主動ETF踩踏／墊料壓貨／3日大事件／大戶地雷），以簡表裁決通過／觀察／淘汰並點名進模式B之 Top 1～2！")
     return "\n".join(lines)
 
 
-def build_mode_b_deep_package(codes: list[str], all_details: dict, price_dict_all: dict, outpost_line: str, now_str: str, live_tdcc_map: dict) -> str:
+def build_mode_b_deep_package_v243(codes: list[str], all_details: dict, price_dict_all: dict, outpost_line: str, now_str: str, live_tdcc_map: dict, holding_notes: dict, is_yellow_red: bool) -> str:
+    target_codes = codes[:3]
+    pe_note = "【黃/紅燈殺估值期：請嚴審產業P/E天花板】" if is_yellow_red else ""
     lines = [
-        f"【淘金客 v24.1｜模式B 決選深檢戰情包（共{len(codes)}檔）】({now_str})",
+        f"【淘金客 v24.3｜模式B 決選深檢戰情包（實附 {len(target_codes)} 檔，核對無漏檔）】({now_str})",
         outpost_line
     ]
-    for idx, c in enumerate(codes[:3], 1):
+    for idx, c in enumerate(target_codes, 1):
         r = all_details.get(c)
+        hold_s = holding_notes.get(c, "空手新單（無既有部位）")
         if r:
             mkt = r.get("_mkt", "TW")
             anti_trap = fetch_single_stock_anti_trap(c, mkt)
@@ -2289,33 +2541,36 @@ def build_mode_b_deep_package(codes: list[str], all_details: dict, price_dict_al
             pe_s = f"{r['本益比(PE)']:.1f}x" if pd.notna(r.get("本益比(PE)")) else "N/A"
             lines.extend([
                 f"=== 決選標的 {idx}：{c} {r['_raw_name']} ({mkt}) ===",
+                f"• 持倉帳務狀態：{hold_s}",
                 f"• 報價與賽道：現價={r['現價']}({r['今日%']:+.2f}% / 3日{r['3日%']:+.2f}%) | 型態={r.get('_pattern_tag', r['短線屬性'])} | 穀倉={r['穀倉賽道與防墊料']} | CB={r.get('_cb', '➖')}",
                 f"• 完整均線與城堡：5MA={r['_ma5']} / 10MA={r['_ma10']} / 20MA={r['_ma20']} / 60MA={r['_ma60']} / 120MA={r['_ma120']} / 240MA={r['_ma240']} | 天花板={r['天花板(反壓)']} / 鋼鐵防線={r['鋼鐵防線']} / 停損={r['極限停損']}",
                 f"• DMI、乖離與波動：{r['DMI方向雙檢']} | 日J={r['日J值']} | BIAS10={r['BIAS10']} / BIAS20={r['BIAS20']} | ATR%={r['ATR%波動尺']}",
                 f"• 假突破三合一：5MA量比={r['5MA量比']}x (昨量比{r['昨日量比']}x / 預估{r['預估量(張)']:,}張) | 上影線%={up_sh} | 收盤位階={r['收盤位階']} | 當沖率={r['當沖率']}",
-                f"• 量能與籌碼動能：OBV={r['OBV趨勢']} | RS20D={r['RS20D%']} | 法人={r['法人動向']} | 大戶={tdcc_s}",
-                f"• 基本面與防墊料：最新月營收YoY={r['單月營收YoY']} / 累計YoY={r['累計年營收YoY']} | 預估EPS={eps_s} / PE={pe_s} ({r['估值診斷']}) | 季報防墊料={anti_trap.get('note', 'N/A')}"
+                f"• 量能與籌碼動能：OBV={r['OBV趨勢']} | RS20D={r['RS20D%']} | 法人={r['法人動向']} (自營商與Sum-Check請聯網補齊) | 大戶={tdcc_s}",
+                f"• 基本面與防墊料：最新月營收YoY={r['單月營收YoY']} / 累計YoY={r['累計年營收YoY']} | 預估EPS={eps_s} / PE={pe_s} ({r['估值診斷']}){pe_note} | 季報防墊料={anti_trap.get('note', 'N/A')}"
             ])
         else:
             p_inf = price_dict_all.get(c, {})
             mkt = p_inf.get("market", "TW")
             anti_trap = fetch_single_stock_anti_trap(c, mkt)
-            nm = p_inf.get("name", c)
             tdcc_s = format_tdcc_with_override({"代碼": c, "大戶400/千張": "N/A"}, live_tdcc_map)
             lines.extend([
-                f"=== 決選標的 {idx}：{c} {nm} ({mkt}・非主掃描池) ===",
+                f"=== 決選標的 {idx}：{c} {p_inf.get('name', c)} ({mkt}・非主掃描池) ===",
+                f"• 持倉帳務狀態：{hold_s}",
                 f"• 基礎報價：現價={p_inf.get('close', 'N/A')}({p_inf.get('chg_pct', 0):+.2f}%) | 成交量={p_inf.get('vol_lots', 0):,}張 | 當沖率={p_inf.get('day_trade_str', 'N/A')}",
-                f"• 籌碼與防墊料：外資={p_inf.get('fini_lots', 0):+,}張 / 投信={p_inf.get('sitc_lots', 0):+,}張 | 大戶={tdcc_s} | 季報防墊料={anti_trap.get('note', 'N/A')} | 完整技術面=N/A (交由淘金客聯網查核)"
+                f"• 籌碼與防墊料：外資={p_inf.get('fini_lots', 0):+,}張 / 投信={p_inf.get('sitc_lots', 0):+,}張 | 大戶={tdcc_s} | 季報防墊料={anti_trap.get('note', 'N/A')} | 完整技術面=N/A(請聯網補查)"
             ])
-    lines.append("➔ 請執行【淘金客 v24.1 模組 20 雙核全維度深檢】：優先聯網補查法說催化劑、主力分點與資券借，輸出具體進出場城堡點位、一票否決裁決與鐵血紀律！")
+    pk_tail = " ※本次傳入多檔，請於最末段強制附加【決選優先排序表】排出第 1～3 順位！" if len(target_codes) >= 2 else ""
+    lines.append(f"[深檢結尾核對：實附 {len(target_codes)} 檔完畢] ➔ 請執行【淘金客 v24.3 模式B 模組 20 雙核深檢】：強制補搜處置新制、自營商Sum-Check、主動ETF踩踏、資券借與法說催化劑，獨立列出 App 訊號裁決、城堡各階具體價位與雙軌行動(新單空手 vs 既有底倉/短單停損)！{pk_tail}")
     return "\n".join(lines)
 
 
 # ==========================================
-# Streamlit 主程式入口 (v60.0 淘金客 v24.1 雙腦互補戰情室)
+# Streamlit 主程式入口 (v61.0 對接淘金客 v24.3 旗艦版)
 # ==========================================
-now_str = get_tw_now().strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🚨 台股每日戰情室 v60.0 (對接淘金客 v24.1：5組量化接軌指標 ＋ 雙模式戰情包 ＋ 股災雙雷達)")
+now_tw_dt = get_tw_now()
+now_str = now_tw_dt.strftime("%Y-%m-%d %H:%M:%S")
+st.markdown("## 🚨 台股每日戰情室 v61.0 (對接淘金客 v24.3：三階燈號 ＋ 滾動事件時間軸 ＋ 11/23最新持倉＆短單分帳)")
 
 btn_c1, btn_c2, btn_c3 = st.columns([2, 2, 3])
 if btn_c1.button("⚡ 秒速刷新即時報價、5組指標與雙雷達", use_container_width=True):
@@ -2325,7 +2580,7 @@ if btn_c2.button("🔄 重抓期交所、三大法人、當沖率與最新月營
     st.cache_data.clear()
 auto_refresh = btn_c3.checkbox("⏱️ 開啟盤中每 20 秒自動刷新", value=False)
 
-with st.spinner("📡 正在同步 5 組量化接軌指標 (DMI/BIAS/當沖/OBV/RS/ATR%)、股災雙雷達與 MSCI 動態池..."):
+with st.spinner("📡 正在同步淘金客 v24.3 三階燈號雙雷達、滾動風險事件時間軸、5組指標與 11/23 最新資產帳務..."):
     df_launch, df_pullback, df_orbit, df_long_bc, df_long_turn, vol_note, rt_quotes, msci_data, price_dict_all = scan_all_stocks()
     fleet = fetch_and_analyze_fleet(rt_quotes, price_dict_all=price_dict_all)
     us_data = fetch_us_sectors_and_leaders()
@@ -2343,49 +2598,78 @@ df_granary_audit = st.session_state.get("granary_audit_df", pd.DataFrame())
 df_msci_audit = st.session_state.get("msci_audit_df", pd.DataFrame())
 
 # ==========================================
-# 左側雙階讀取覆寫控制台 (Sidebar)
+# 左側雙階讀取覆寫控制台 (Sidebar — 已全面更新為 2026/11/23 最新對帳單庫存)
 # ==========================================
 with st.sidebar:
-    st.markdown("### 🎛️ 雙階讀取覆寫控制台")
-    st.caption("盤中或特殊日若有無法即時爬取之籌碼，可直接覆寫（第一優先覆寫權）：")
+    st.markdown("### 🎛️ 雙階讀取覆寫控制台 (v24.3)")
+    st.caption("第一優先覆寫權：若盤中或官資延遲，可直接手動覆寫以下指標：")
     sb_fini_oi = st.number_input("外資台指期淨未平倉 (口)", value=int(deriv["fini_tx_oi"]), step=1000)
     sb_margin_2d = st.number_input("近2日上市櫃融資合計增減 (億)", value=float(deriv.get("margin_2d_chg_yi", -971.7)), step=50.0, format="%.1f")
+    sb_margin_2d_pct = st.number_input("近2日融資變動幅 (%)", value=-18.2, step=1.0, format="%.1f")
     sb_margin_dd = st.number_input("波段融資總減幅 (%)", value=18.5, step=1.0, format="%.1f")
-    sb_maint = st.number_input("全市場融資維持率 (%)", value=151.78 if fleet["twii_now"] < 37000 else float(deriv["stock_only_maint_pct"]), step=0.5, format="%.2f")
+    sb_maint = st.number_input("整戶融資維持率 (%)", value=151.78 if fleet["twii_now"] < 37000 else float(deriv["stock_only_maint_pct"]), step=0.5, format="%.2f")
     sb_basis = st.number_input("期現貨價差 (點，負=逆價差)", value=-150.0 if fleet["twii_now"] < 37000 else 0.0, step=20.0, format="%.0f")
-    sb_basis_stable = st.checkbox("期現貨逆價差已達極點且不再擴大", value=False)
+    sb_basis_stable = st.checkbox("恐慌逆價差已達極點且不再擴大", value=False)
     sb_consec_cover = st.number_input("外資期貨連補天數 (日)", value=int(deriv.get("consec_cover_days", 1)), min_value=0, max_value=15, step=1)
     sb_cover_3d = st.number_input("外資近3日累計回補 (口)", value=int(deriv.get("cover_3d_sum", 1800)), step=1000)
     sb_limit_dn = st.number_input("當日上市櫃跌停家數 (家)", value=int(fleet["limit_down_cnt"]), min_value=0, step=5)
     sb_had_100 = st.checkbox("本波曾見破百檔跌停高峰", value=True)
+    sb_ban_active = st.checkbox("限空令 / 國安基金護盤生效中", value=True)
+    sb_ban_date = st.date_input("限空令／護盤起始日", value=datetime.date(2026, 11, 23))
+
     st.markdown("---")
-    st.markdown("### 💧 四水庫持股張數調整")
-    sb_lots_00985b = st.number_input("水庫三：00985B 持有張數", value=0.0, min_value=0.0, step=1.0, format="%.1f")
-    sb_lots_00713 = st.number_input("水庫三：00713 持有張數", value=0.0, min_value=0.0, step=0.5, format="%.1f")
-    sb_lots_00400a = st.number_input("待退場：00400A 持有張數", value=31.0, min_value=0.0, step=1.0, format="%.1f")
-    sb_lots_6239 = st.number_input("衛星換股：力成(6239) 張數", value=2.3, min_value=0.0, step=0.1, format="%.1f")
-    sb_lots_3264 = st.number_input("衛星換股：欣銓(3264) 張數", value=1.0, min_value=0.0, step=0.1, format="%.1f")
+    st.markdown("### 💧 11/23 最新四水庫＆短單帳務")
+    sb_lots_00985b = st.number_input("水庫三：00985B 張數 (@10.38)", value=5.0, min_value=0.0, step=1.0, format="%.1f")
+    sb_lots_00713 = st.number_input("水庫三：00713 張數", value=0.0, min_value=0.0, step=0.5, format="%.1f")
+    sb_shares_3711_short = st.number_input("換強短單：日月光零股 (股 @474)", value=300, min_value=0, step=100)
+    sb_short_3711_be = st.number_input("日月光短單損益平衡價 (元)", value=476.79, min_value=0.0, step=1.0, format="%.2f")
+    sb_lots_00400a = st.number_input("待退場：00400A 張數 (@14.40)", value=31.0, min_value=0.0, step=1.0, format="%.1f")
+    sb_lots_6239 = st.number_input("衛星剩餘：力成(6239) 張數 (@245.75)", value=1.0, min_value=0.0, step=0.1, format="%.1f")
+    sb_lots_3264 = st.number_input("衛星剩餘：欣銓(3264) 張數 (已清)", value=0.0, min_value=0.0, step=0.1, format="%.1f")
+    sb_twd_cash_wan = st.number_input("水庫四：機動台幣現金 (萬元)", value=17.4, min_value=0.0, step=1.0, format="%.1f")
     sb_usd_cash = st.number_input("水庫四：美金現金 (USD)", value=2300.0, min_value=0.0, step=100.0, format="%.0f")
 
 # ==========================================
-# 全域頂部：模組二 關鍵風險事件倒數警示條
+# 全域頂部：模組二 滾動動態風險事件警示條 ＋ 時間軸 SVG ＋ 多空劇本表
 # ==========================================
-ev_rows, next_ev = get_upcoming_risk_events()
+ev_rows, upcoming_ev_rows, next_ev = get_dynamic_rolling_events(horizon_days=90)
 if next_ev:
     d_left = next_ev["_days"]
     ev_cls = "event-banner-red" if d_left <= 3 else ("event-banner-yellow" if d_left <= 7 else "event-banner-blue")
-    ev_warn_tip = "🚨 【高波動警戒：事件前 3 天內！反彈遇壓減碼、嚴禁開槓桿！】" if d_left <= 3 else "📌 提早規劃資金水位與防禦避險。"
+    ev_warn_tip = "🚨 【高波動警戒：事件前 3 天內！反彈遇壓減碼、嚴禁開槓桿！】" if d_left <= 3 else "📌 自動滾動追蹤未來 90 天官宣與月度例行事件。"
     st.markdown(clean_html(f"""
     <div class="{ev_cls}">
     <b>📅 下一個重大風險事件倒數：{next_ev['日期']}（{next_ev['倒數狀態']}）➔ {next_ev['重大風險事件']}</b><br>
-    • {ev_warn_tip} 實戰因應：<b>{next_ev['實戰防禦提醒']}</b>
+    • {ev_warn_tip} ｜ 🟢 <b>優於預期</b>：{next_ev['🟢 優於預期／鴿派劇本']} ｜ 🔴 <b>差於預期</b>：{next_ev['🔴 差於預期／鷹派劇本']}
     </div>
     """), unsafe_allow_html=True)
 
-with st.expander("🗓️ 點此展開【2026/11 ～ 2027/01 完整關鍵風險事件行事曆 (12 檔)】", expanded=False):
-    st.dataframe(pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in ev_rows]), use_container_width=True, hide_index=True)
+with st.expander("🗓️ 點此展開【自動滾動風險事件視覺化時間軸圖 ＋ 數據公布後多空劇本說明表 ＋ 自訂事件新增】", expanded=False):
+    st.markdown(build_event_timeline_svg_html(upcoming_ev_rows), unsafe_allow_html=True)
+    df_ev_show = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in ev_rows])
+    st.dataframe(df_ev_show, use_container_width=True, hide_index=True)
 
-# 計算核心美股/匯率與股災雙雷達結果
+    st.markdown("##### ➕ 新增單次突發風險事件（例如重要法說會、地緣政治或解禁日）")
+    ce_c1, ce_c2, ce_c3, ce_c4 = st.columns([1.2, 1.5, 2.2, 2.2])
+    ce_date = ce_c1.date_input("事件日期", value=now_tw_dt.date() + datetime.timedelta(days=5), key="ce_d")
+    ce_short = ce_c2.text_input("時間軸簡稱 (8字內)", value="", placeholder="例：台積電法說會", key="ce_s")
+    ce_bull = ce_c3.text_input("🟢 優於預期劇本", value="展望優於預期帶動 AI 估值修復", key="ce_b")
+    ce_bear = ce_c4.text_input("🔴 差於預期劇本", value="下修資本支出引發供應鏈修正", key="ce_r")
+    if st.button("💾 儲存新增事件至滾動時間軸", key="btn_add_ce"):
+        if ce_short.strip():
+            cur_list = []
+            if os.path.exists(CUSTOM_EVENTS_FILE):
+                try:
+                    with open(CUSTOM_EVENTS_FILE, "r", encoding="utf-8") as f: cur_list = json.load(f)
+                except Exception: cur_list = []
+            cur_list.append({"date": ce_date.strftime("%Y-%m-%d"), "short": ce_short.strip(), "title": f"【自訂】{ce_short.strip()}", "level": "HIGH", "bull": ce_bull, "bear": ce_bear, "action": "事件前3天控管槓桿與倉位"})
+            try:
+                with open(CUSTOM_EVENTS_FILE, "w", encoding="utf-8") as f: json.dump(cur_list, f, ensure_ascii=False)
+                st.success("✅ 已寫入滾動事件簿！重新整理即可顯示於時間軸。")
+            except Exception as e:
+                st.error(f"儲存失敗：{e}")
+
+# 計算核心美股/匯率與 v24.3 股災雙雷達結果
 vix_q = us_data["quotes"].get("%5EVIX", {})
 vix_now, vix_chg = vix_q.get("close", 37.66), vix_q.get("chg_pct", +12.5)
 tnx_val, tnx_chg = us_data.get("tnx_val", 4.94), us_data.get("tnx_chg", -1.20)
@@ -2394,60 +2678,65 @@ tsm_q, nvda_q = us_data["quotes"].get("TSM", {}), us_data["quotes"].get("NVDA", 
 tsm_chg, tsm_ext = tsm_q.get("chg_pct", -9.48), (f" ({tsm_q['ext_label']})" if tsm_q.get("ext_label") else "")
 nvda_chg, nvda_ext = nvda_q.get("chg_pct", -14.01), (f" ({nvda_q['ext_label']})" if nvda_q.get("ext_label") else "")
 fx_now, fx_ma5, fx_chg_ntd = deriv["fx_now"], deriv["fx_ma5"], deriv["fx_chg_ntd"]
+fx_stopped_dep = bool(fx_chg_ntd <= 0.0 or fx_now <= fx_ma5)
 macro_withdrawal_alert = bool(tnx_val >= 5.0 and fx_now >= 32.50)
+days_since_ban = (now_tw_dt.date() - sb_ban_date).days
 
-radar = evaluate_crash_and_bottom_radar(
-    fleet["twii_now"], fleet["ma240"], fleet["twii_30d_dd_pct"], fleet["sp500_below_ma200"],
-    vix_now, fleet["sox_dd_pct"], sb_fini_oi, sb_margin_dd, sb_margin_2d, sb_maint,
+radar = evaluate_crash_and_bottom_radar_v243(
+    fleet["twii_now"], fleet["ma60"], fleet["ma120"], fleet["ma240"], fleet["twii_30d_dd_pct"], fleet["sp500_below_ma200"],
+    vix_now, fleet["sox_dd_pct"], sb_fini_oi, sb_margin_dd, sb_margin_2d, sb_margin_2d_pct, sb_maint,
     fleet["is_climax_hammer"], fleet["twii_vol_20ma_ratio"], fleet["twii_lower_shadow_ratio"],
-    sb_basis, sb_basis_stable, sb_consec_cover, sb_cover_3d, sb_limit_dn, sb_had_100
+    sb_basis, sb_basis_stable, sb_consec_cover, sb_cover_3d,
+    fx_stopped_dep, sb_limit_dn, sb_had_100,
+    sb_ban_active, days_since_ban, fleet["twii_consec_above_ma10"]
 )
 
-# 比價換股即時報價
-p_6239 = rt_quotes.get("6239", {}).get("close") or price_dict_all.get("6239", {}).get("close", 181.5)
-p_3264 = rt_quotes.get("3264", {}).get("close") or price_dict_all.get("3264", {}).get("close", 136.0)
-p_3711 = rt_quotes.get("3711", {}).get("close") or price_dict_all.get("3711", {}).get("close", 457.0)
-swap_sell_twd = 2000.0 * p_6239 + 1000.0 * p_3264
-swap_ratio = round((2.0 * p_6239 + 1.0 * p_3264) / max(1.0, p_3711), 3)
-swap_net_cash = round(swap_sell_twd - 1000.0 * p_3711 - 3000.0, 0)
+# 模組 9 盤中 09:00-09:15 紅燈恐慌避開提示
+t_min_now = now_tw_dt.hour * 60 + now_tw_dt.minute
+is_panic_open_window = (radar["master_state"] == "RED_LOCKED") and (now_tw_dt.weekday() < 5) and (540 <= t_min_now <= 555)
 
-if p_3711 >= 455.0:
-    ase_zone, swap_signal = "🔴 高風險區 (>=455元)", "🔴 嚴禁追換！開板有量先賣出(2張力成+1張欣銓)抱台幣現金，等 12 月中二次測底！"
-elif p_3711 >= 420.0:
-    ase_zone = "🟡 過渡觀察區 (420~454元)"
-    swap_signal = "🟡 比值達標惟日月光仍在過渡區，優先先賣抱現或等回測 415 以下！" if swap_ratio >= 1.18 else "🟠 比值未達 1.18，先賣抱現等二次測底！"
-elif p_3711 >= 360.0:
-    ase_zone = "🟢 合理黃金區 (360~415元)"
-    swap_signal = f"🟢 【觸發換股綠燈！】比值 {swap_ratio:.3f} >= 1.18，立刻換買 1 張日月光並保留淨現金 {swap_net_cash:+,.0f} 元！" if swap_ratio >= 1.18 else f"🟠 日月光已入合理區，但比值 {swap_ratio:.3f} < 1.18，建議先賣抱現或視盤況擇機承接！"
-else:
-    ase_zone = "💎 鐵板鑽石區 (<=359元)"
-    swap_signal = f"💎 【鑽石重錘換股訊號！】比值 {swap_ratio:.3f}，立刻換買 1 張日月光並留淨現金 {swap_net_cash:+,.0f} 元！" if swap_ratio >= 1.18 else f"🟢 日月光落入鐵板區，雖比值 {swap_ratio:.3f} < 1.18，可逢低換入 1 張日月光！"
-
-# 四水庫即時市值試算
+# 四水庫即時報價與市值試算
 def get_live_p(code_k, default_v):
-    return float(rt_quotes.get(code_k, {}).get("close") or price_dict_all.get(code_k, {}).get("close") or default_v)
+    is_open_t = (now_tw_dt.weekday() < 5) and (t_min_now >= 540)
+    rt_v = rt_quotes.get(code_k, {}).get("close", 0.0) if is_open_t else 0.0
+    return float(rt_v or price_dict_all.get(code_k, {}).get("close") or default_v)
 
-p_2330, p_2884, p_2881 = get_live_p("2330", 2000.0), get_live_p("2884", 39.6), get_live_p("2881", 136.5)
-p_2812, p_2887, p_2834 = get_live_p("2812", 15.75), get_live_p("2887", 36.0), get_live_p("2834", 16.5)
+p_2330, p_3711 = get_live_p("2330", 2030.0), get_live_p("3711", 482.0)
+p_6239, p_3264 = get_live_p("6239", 191.0), get_live_p("3264", 141.5)
+p_2884, p_2881 = get_live_p("2884", 38.7), get_live_p("2881", 130.5)
+p_2812, p_2887, p_2834 = get_live_p("2812", 15.6), get_live_p("2887", 33.0), get_live_p("2834", 16.05)
 p_avgo = us_data["quotes"].get("AVGO", {}).get("close") or etf_m["AVGO"]["p"]
 p_nvda = us_data["quotes"].get("NVDA", {}).get("close") or etf_m["NVDA"]["p"]
 p_sgov = us_data["quotes"].get("SGOV", {}).get("close") or etf_m["SGOV"]["p"]
 p_00400a, p_00985b, p_00713 = etf_m["00400A"]["p"], etf_m["00985B"]["p"], etf_m["00713"]["p"]
+ma5_3711 = etf_m.get("3711", {}).get("ma5", 470.0)
 
 val_r1 = 400000.0
 val_r2_tw_semi = 4000 * p_2330 + 3000 * p_3711
-val_r2_tw_fin = 100453 * p_2884 + 11743 * p_2881 + 27148 * p_2812 + 4882 * p_2887 + 158 * 9.55 + 1090 * p_2834
+val_r2_tw_fin = 100453 * p_2884 + 11743 * p_2881 + 27148 * p_2812 + 4882 * p_2887 + 158 * 9.57 + 1090 * p_2834
 val_r2_us_semi = (35 * p_avgo + 80 * p_nvda) * fx_now
 val_r2 = val_r2_tw_semi + val_r2_tw_fin + val_r2_us_semi
 val_r3 = sb_lots_00985b * 1000 * p_00985b + sb_lots_00713 * 1000 * p_00713
-val_r4 = (30 * p_sgov + sb_usd_cash) * fx_now
+val_r4 = (30 * p_sgov + sb_usd_cash) * fx_now + sb_twd_cash_wan * 10000.0
+val_short_3711 = sb_shares_3711_short * p_3711
 val_sat_semi = sb_lots_6239 * 1000 * p_6239 + sb_lots_3264 * 1000 * p_3264
 val_sat_400a = sb_lots_00400a * 1000 * p_00400a
-total_assets = val_r1 + val_r2 + val_r3 + val_r4 + val_sat_semi + val_sat_400a
-semi_total = val_r2_tw_semi + val_r2_us_semi + val_sat_semi
+total_assets = val_r1 + val_r2 + val_r3 + val_r4 + val_short_3711 + val_sat_semi + val_sat_400a
+semi_total = val_r2_tw_semi + val_r2_us_semi + val_short_3711 + val_sat_semi
 semi_ratio_pct = round((semi_total / max(1.0, total_assets)) * 100.0, 1)
 
-# 整理優先排序表
+# 既有持倉帳務字典（自動連動 Mode B 數據包，供 v24.3 產出雙軌實戰行動）
+holding_notes_map = {
+    "3711": f"【雙軌分帳】(1)水庫二傳家寶底倉 3張(@172.67)不動；(2)11/23淨降倉換強獨立短單 {sb_shares_3711_short}股(@474.0/平衡價{sb_short_3711_be:.2f}/5MA={ma5_3711:.1f}，破5MA或平衡價即退！)",
+    "6239": f"衛星剩餘 {sb_lots_6239:.1f}張 (@245.75/平衡價247.2，已於11/23減碼1.3張)",
+    "2330": "水庫二傳家寶核心底倉 4張 (@229.11，全程死抱不動)",
+    "2884": "水庫二傳家寶核心底倉 100.453張 (@19.15)",
+    "2881": "水庫二傳家寶核心底倉 11.743張 (@69.50)",
+    "2812": "水庫二傳家寶核心底倉 27.148張 (@7.83)",
+    "00400A": f"待退場主動ETF {sb_lots_00400a:.0f}張 (@14.40，不加碼、逢彈滾動退場轉00985B)",
+    "00985B": f"水庫三低波債券 {sb_lots_00985b:.1f}張 (@10.38)"
+}
+
 df_launch = prioritize_granary_and_armor_df(df_launch, macro_withdrawal_alert, "實戰優先分")
 df_pullback = prioritize_granary_and_armor_df(df_pullback, macro_withdrawal_alert, "蓄勢評分")
 df_long_bc = prioritize_granary_and_armor_df(df_long_bc, macro_withdrawal_alert, "波段總分")
@@ -2459,14 +2748,14 @@ if not df_launch.empty and "短線屬性" in df_launch.columns:
 else:
     df_launch_fund, df_launch_pure = pd.DataFrame(), pd.DataFrame()
 
-outpost_line = build_market_outpost_line(fleet, radar, deriv, tnx_val, fx_now)
+outpost_line = build_market_outpost_line_v243(fleet, radar, deriv, tnx_val, fx_now, sb_ban_active, next_ev)
 
 # ==========================================
 # 六大功能分頁架構
 # ==========================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🚨 雙雷達＆v24.1戰情包",
-    "⚖️ 比價換股＆四水庫監控",
+    "🚨 雙雷達＆v24.3戰情包",
+    "⚖️ 換股＆短單＆四水庫",
     "⚡ 短線旱地拔蔥榜",
     "🏛️ 長線波段＆MSCI主流池",
     "🌾 穀倉與防墊料專區",
@@ -2475,7 +2764,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 
 # ==================== TAB 1 ====================
 with tab1:
-    hero_cls = "war-hero-box-danger" if radar["master_state"] == "LOCKED" else ("war-hero-box" if radar["master_state"] == "UNLOCKED_DIP" else "war-hero-box-warn")
+    if is_panic_open_window:
+        st.error("⏰ 【模組 9 紅燈盤中紀律】目前為 09:00-09:15 恐慌集中賣壓區！減碼弱勢股或比價換股請避開此低點（除非瀕臨鎖跌停），改於 09:15 後流動性穩定或反彈遇壓執行！")
+
+    hero_cls = "war-hero-box-danger" if radar["master_state"] == "RED_LOCKED" else ("war-hero-box-warn" if radar["master_state"] == "YELLOW" else "war-hero-box")
     idx_col = "#ff4d4f" if fleet["twii_chg_pct"] >= 0 else "#00e676"
     sox_c = "#ff4d4f" if sox_chg >= 0 else "#00e676"
     tsm_c = "#ff4d4f" if tsm_chg >= 0 else "#00e676"
@@ -2483,6 +2775,7 @@ with tab1:
 
     w_html = "<br>".join([f"{'🔴' if f else '⚪'} {txt}" for f, txt in radar["w_items"]])
     b_html = "<br>".join([f"{'🟢' if f else '⚪'} {txt}" for f, txt in radar["b_items"]])
+    ban_badge = "🛡️ <b>限空令生效中</b>（凍結借券賣減看多加分，改看外資現貨＋期貨連補＋台幣止貶）" if sb_ban_active else "⚪ 目前無限空令"
 
     st.markdown(clean_html(f"""
     <div class="{hero_cls}">
@@ -2490,28 +2783,27 @@ with tab1:
     📊 台股加權指數：<span style="font-size:34px; color:{idx_col};">{fleet['twii_now']:,.1f} 點 ({fleet['twii_chg_pct']:+.2f}%)</span>
     &nbsp;｜&nbsp; {radar['master_badge']}
     </div>
-    <div style="font-size:14.8px; color:#e2e8f0; background:rgba(0,0,0,0.35); padding:8px 14px; border-radius:8px; margin-bottom:10px; line-height:1.65;">
+    <div style="font-size:14.6px; color:#e2e8f0; background:rgba(0,0,0,0.35); padding:8px 14px; border-radius:8px; margin-bottom:10px; line-height:1.68;">
     • 🕒 <b>對時與區間</b>：{fleet['date_str']}（開盤 <b>{fleet['twii_open']:,.0f}</b> ／ 低 <b>{fleet['twii_low']:,.0f}</b> ～ 高 <b>{fleet['twii_high']:,.0f}</b> ／ 昨收 <b>{fleet['twii_prev_c']:,.0f}</b>）｜ <b>月20MA鐵板：{fleet['m_ma20']:,.0f}點</b> ｜ <b>年線：{fleet['ma240']:,.0f}點</b><br>
-    • ⚖️ <b>總開關最高紀律指令</b>：<b style="color:#fde047;">{radar['master_action']}</b>
+    • ⚖️ <b>模組 0 最高權限指令</b>：<b style="color:#fde047;">{radar['master_action']}</b><br>
+    • {ban_badge} ｜ 連站10MA天數：<b>{fleet['twii_consec_above_ma10']} 日</b>
     </div>
     <div class="radar-grid-2">
     <div class="radar-panel" style="border-left:5px solid {'#ff4d4f' if radar['crash_warning_on'] else '#64748b'};">
-    <span class="war-dim-concl" style="color:#ff8a80;">🔴 一、股災啟動預警雷達（目前觸發 {radar['w_count']} / 5 項 ｜ >=3 項紅燈鎖死）</span>
+    <span class="war-dim-concl" style="color:#ff8a80;">🔴 一、股災啟動預警雷達（觸發 {radar['w_count']} / 5 項 ｜ ≧3項亮紅燈）</span>
     {w_html}
     </div>
     <div class="radar-panel" style="border-left:5px solid {'#00e676' if radar['bottom_confirmed'] else '#f59e0b'};">
-    <span class="war-dim-concl" style="color:#69f0ae;">🟢 二、股災落底確認雷達（目前達成 {radar['b_count']} / 5 項 ｜ >=4 項共振解鎖）</span>
+    <span class="war-dim-concl" style="color:#69f0ae;">🟢 二、股災落底確認雷達（達成 {radar['b_count']} / 5 項 ｜ ≧4項共振解鎖）</span>
     {b_html}
     </div>
     </div>
     </div>
     """), unsafe_allow_html=True)
 
-    # ==========================================
-    # v60.0 核心亮點：淘金客 v24.1 雙模式一鍵複製戰情數據包匯出中心
-    # ==========================================
-    st.markdown("### 🤖 【淘金客 v24.1 雙腦互補：一鍵複製戰情數據包匯出中心】（右上角圖示直接一鍵複製）")
-    pkg_tab_a, pkg_tab_b = st.tabs(["🛡️ 按鈕 A：守門員快篩批次包（自動切批，每批 5～6 檔）", "🔬 按鈕 B：單檔／決選深檢戰情包（精選 1～3 檔＋季報防墊料）"])
+    # 雙模式戰情數據包匯出中心 (對接淘金客 v24.3 模組 20)
+    st.markdown("### 🤖 【淘金客 v24.3 雙腦互補：一鍵複製戰情數據包匯出中心】（防截斷核對 ＋ 右上角一鍵複製）")
+    pkg_tab_a, pkg_tab_b = st.tabs(["🛡️ 按鈕 A：守門員快篩批次包（自動切批 5～6 檔）", "🔬 按鈕 B：決選深檢戰情包（1～3 檔＋持倉分帳＋季報防墊料）"])
 
     with pkg_tab_a:
         pool_map = {
@@ -2541,50 +2833,49 @@ with tab1:
             fetch_a_tdcc = pa_c4.checkbox("📡 補抓本批 FinMind 大戶週變動", value=False, key="mode_a_tdcc")
 
             custom_a = st.multiselect(
-                "✏️ 可微調本批匯出標的（上限 6 檔，預設為上方自動切批結果）：",
-                options=pool_codes,
-                default=batch_codes,
-                max_selections=6,
+                "✏️ 可微調本批匯出標的（上限 6 檔）：",
+                options=pool_codes, default=batch_codes, max_selections=6,
                 format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']}",
                 key=f"mode_a_ms_{sel_pool_k}_{b_idx}"
             )
             final_a_codes = custom_a if custom_a else batch_codes
             live_tdcc_a = fetch_tdcc_weekly_delta_ondemand(tuple(final_a_codes)) if fetch_a_tdcc else {}
-            mode_a_txt = build_mode_a_guard_package(final_a_codes, sel_pool_k.split(" (")[0], sel_b_lbl, all_scanned_details, outpost_line, now_str, live_tdcc_a)
+            mode_a_txt = build_mode_a_guard_package_v243(final_a_codes, sel_pool_k.split(" (")[0], sel_b_lbl, all_scanned_details, outpost_line, now_str, live_tdcc_a)
             st.code(mode_a_txt, language="text")
         else:
-            st.info("目前選擇的清單無符合標的（股災期間右側表 1-A 可能為空），請切換至『長線表3-B』、『MSCI』或『宏爺穀倉』清單匯出！")
+            st.info("目前選擇的清單無符合標的，請切換至『長線表3-B』、『MSCI』或『宏爺穀倉』清單匯出！")
 
     with pkg_tab_b:
-        all_opt_codes = sorted(all_scanned_details.keys(), key=lambda c: (0 if c in ["3711", "2330", "6239", "3264", "2301", "2454"] else 1, c))
+        all_opt_codes = sorted(all_scanned_details.keys(), key=lambda c: (0 if c in ["3711", "6239", "2330", "2884", "2881", "2454"] else 1, c))
         default_b = [c for c in ["3711", "6239"] if c in all_opt_codes][:2]
         pb_c1, pb_c2 = st.columns([3.2, 2.0])
         sel_b_codes = pb_c1.multiselect(
-            "🎯 從已掃描個股中勾選決選標的（最多 3 檔）：",
-            options=all_opt_codes,
-            default=default_b,
-            max_selections=3,
+            "🎯 勾選決選標的（最多 3 檔；含庫存股會自動帶入成本與獨立停損）：",
+            options=all_opt_codes, default=default_b, max_selections=3,
             format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']} ({all_scanned_details[c]['現價']})",
             key="mode_b_ms"
         )
-        manual_b_str = pb_c2.text_input("⌨️ 或手動輸入 4 碼代號（逗號分隔，覆寫上限3檔）", value="", placeholder="例：3711, 2383, 3189", key="mode_b_manual")
+        manual_b_str = pb_c2.text_input("⌨️ 或手動輸入 4 碼代號（逗號分隔，上限3檔）", value="", placeholder="例：3711, 2881, 2383", key="mode_b_manual")
         manual_b_codes = [c for c in re.findall(r"\b(\d{4})\b", manual_b_str)][:3]
         target_b_codes = manual_b_codes if manual_b_codes else sel_b_codes
 
-        if st.button("⚡ 生成【模式 B 決選深檢戰情包】（即時補抓季報防墊料 ＋ 400/千張大戶週變動）", type="primary", key="btn_gen_mode_b"):
+        if st.button("⚡ 生成【淘金客 v24.3 模式 B 深檢戰情包】（補抓季報防墊料 ＋ 大戶週變動）", type="primary", key="btn_gen_mode_b"):
             if target_b_codes:
                 with st.spinner(f"正在抓取 {', '.join(target_b_codes)} 之季報存貨/應收/現金流與集保大戶週變動..."):
                     live_tdcc_b = fetch_tdcc_weekly_delta_ondemand(tuple(target_b_codes))
-                    st.session_state["mode_b_pkg_txt"] = build_mode_b_deep_package(target_b_codes, all_scanned_details, price_dict_all, outpost_line, now_str, live_tdcc_b)
+                    is_yr = radar["master_state"] in ["YELLOW", "RED_LOCKED"]
+                    st.session_state["mode_b_pkg_txt"] = build_mode_b_deep_package_v243(
+                        target_b_codes, all_scanned_details, price_dict_all, outpost_line, now_str, live_tdcc_b, holding_notes_map, is_yr
+                    )
             else:
                 st.warning("請先勾選或輸入 1～3 檔個股代號！")
 
         if "mode_b_pkg_txt" in st.session_state and st.session_state["mode_b_pkg_txt"]:
             st.code(st.session_state["mode_b_pkg_txt"], language="text")
         else:
-            st.caption("💡 經過模式 A 守門員快篩留下 Top 1～3 檔後，於上方選擇標的並點擊紅色按鈕，即可一鍵生成完整深檢數據包（含 6 條均線、季報防墊料與 CB 狀態）。")
+            st.caption("💡 選擇 1～3 檔後點擊紅色按鈕，自動生成對接淘金客 v24.3 模組 20 之深檢包（2～3 檔時自動附帶【決選優先排序表】指令）。")
 
-    # 動態股災四階段週期走勢圖
+    # 精準校準版動態股災週期走勢圖
     st.markdown(build_dynamic_crash_cycle_svg_html(fleet, radar, etf_m), unsafe_allow_html=True)
 
     # 盤面熱門族群與美股/籌碼四大監控卡片
@@ -2600,22 +2891,22 @@ with tab1:
     </div>
     <div class="war-dim-item" style="border-left:5px solid #f59e0b;">
     <span class="war-dim-concl">2. 🌎 美股 VIX / 費半 / ADR 與領漲領跌板塊：{us_data['session_tag']}</span>
-    • <b>美股恐慌與債匯</b>：VIX <b>{vix_now:.2f}</b>({vix_chg:+.1f}%) ｜ 美債10Y <b>{tnx_val:.2f}%</b>({tnx_chg:+.2f}%) ｜ 台幣 <b>{fx_now:.3f}</b><br>
+    • <b>美股恐慌與債匯</b>：VIX <b>{vix_now:.2f}</b>({vix_chg:+.1f}%) ｜ 美債10Y <b>{tnx_val:.2f}%</b>({tnx_chg:+.2f}%) ｜ 台幣 <b>{fx_now:.3f}</b>({'止貶' if fx_stopped_dep else '續貶'})<br>
     • <b>AI 核心連動</b>：費半 <b style="color:{sox_c};">{sox_chg:+.2f}%</b> ｜ 台積ADR <b style="color:{tsm_c};">{tsm_chg:+.2f}%{tsm_ext}</b> ｜ 輝達 <b style="color:{nvda_c};">{nvda_chg:+.2f}%{nvda_ext}</b>
     {up_sec_cards}
     {dn_sec_cards}
     </div>
     <div class="war-dim-item" style="border-left:5px solid #00e676;">
     <span class="war-dim-concl">3. 🛡️ 融資清洗與維持率監控（側邊欄可覆寫）</span>
-    • <b>全市場維持率</b>：<b style="color:#ffd54f; font-size:16.5px;">{sb_maint:.2f}%</b>（低於 155% 進入真斷頭區）<br>
-    • <b>融資增減</b>：最新上市餘額 <b>{deriv['margin_balance_yi']:,.1f} 億</b>（近2日上市櫃合計 <b>{sb_margin_2d:+.1f} 億</b>）<br>
-    • <b>當日跌停廣度</b>：全市場跌停約 <b>{sb_limit_dn} 家</b>（收斂至 &lt;20 家為落底條件之一）
+    • <b>整戶維持率</b>：<b style="color:#ffd54f; font-size:16.5px;">{sb_maint:.2f}%</b>（整戶破150% / 純上市破135% 進入斷頭回升檢核）<br>
+    • <b>融資增減</b>：最新上市餘額 <b>{deriv['margin_balance_yi']:,.1f} 億</b>（近2日合計 <b>{sb_margin_2d:+.1f} 億 / {sb_margin_2d_pct:+.1f}%</b>）<br>
+    • <b>當日跌停廣度</b>：全市場跌停約 <b>{sb_limit_dn} 家</b>（收斂至 &lt;20 家為落底條件）
     </div>
     <div class="war-dim-item" style="border-left:5px solid #ffd54f;">
-    <span class="war-dim-concl">4. 📊 期權籌碼、權證避險與救市政策</span>
+    <span class="war-dim-concl">4. 📊 期權籌碼、權證避險與救市防呆</span>
     • <b>大小台期貨</b>：外資淨未平倉 <b>{sb_fini_oi:+,} 口</b>（連補 {sb_consec_cover}日 / 3日累計 {sb_cover_3d:+,}口）｜ 投信 <b>{deriv['sitc_tx_oi']:+,} 口</b><br>
     • <b>選擇權與權證</b>：PCR <b>{deriv['pc_ratio']:.1f}%</b> ｜ 自營商避險 <b>{deriv['warrant_hedge_yi']:+.2f} 億</b><br>
-    • <b>政策護盤</b>：<b>11/23 限空令 3.0 上路</b>（歷次 20日勝率 80% / 60日勝率 100%）
+    • <b>救市追蹤</b>：限空令 3.0 起始日 <b>{sb_ban_date}</b>（已過 {max(0, days_since_ban)} 天｜連站10MA {fleet['twii_consec_above_ma10']} 日）
     </div>
     </div>
     </div>
@@ -2629,31 +2920,93 @@ with tab1:
         return {"均線週期": nm, "動態點位 (距現價)": f"{val:,.0f} 點 ({pos})", "實戰意義": guide}
 
     st.dataframe(pd.DataFrame([
-        ma_row("① 日 20MA (月線・波段反壓)", fleet["ma20"], "下彎蓋頭強壓，反彈至此區宜減碼 00400A 與弱勢股"),
+        ma_row("① 日 20MA (月線・波段反壓)", fleet["ma20"], "下彎蓋頭強壓，反彈至此區宜調節 00400A 與弱勢股"),
         ma_row("② 日 240MA (年線・多空生命線)", fleet["ma240"], "跌破觸發股災警戒；未站回前反彈皆視為空頭修正反彈"),
-        ma_row("③ 日 5MA (五日攻擊線)", fleet["ma5"], "短線止跌第一步須重新站上並走平"),
-        ma_row("④ 月 20MA (第一隻腳核心鐵板)", fleet["m_ma20"], "歷史急殺股災第一道強力支撐區，對接 11/23 限空令 3.0"),
-        ma_row("⑤ 月 36MA (極端系統底)", fleet["m_ma36"], "若美股引發二次崩跌之終極防禦底線")
+        ma_row("③ 日 10MA (政策逃命波驗證線)", fleet["ma10"], "限空令後須連 3 日站穩 10MA 且落底達 4/5 才脫離逃命波"),
+        ma_row("④ 日 5MA (五日攻擊線)", fleet["ma5"], "短線止跌第一步須重新站上並走平"),
+        ma_row("⑤ 月 20MA (第一隻腳核心鐵板)", fleet["m_ma20"], "歷史急殺股災第一道強力支撐區，對接 11/23 限空令 3.0"),
+        ma_row("⑥ 月 36MA (極端系統底)", fleet["m_ma36"], "若美股引發二次崩跌之終極防禦底線")
     ]), use_container_width=True, hide_index=True)
 
-# ==================== TAB 2: 比價換股與四水庫監控 ====================
+# ==================== TAB 2: 換股計算機、短單獨立分帳與四水庫 ====================
 with tab2:
-    st.markdown("#### ⚖️ 【模組三之一：盤中比價換股試算器（2張力成 6239 ＋ 1張欣銓 3264 ➔ 換買 1張日月光 3711）】")
-    sw_c1, sw_c2, sw_c3, sw_c4 = st.columns(4)
-    sw_c1.metric("力成 (6239) 現價", f"{p_6239:.2f} 元", f"持有 {sb_lots_6239:.1f} 張 (@250.17)")
-    sw_c2.metric("欣銓 (3264) 現價", f"{p_3264:.2f} 元", f"持有 {sb_lots_3264:.1f} 張 (@168.00)")
-    sw_c3.metric("日月光 (3711) 現價", f"{p_3711:.2f} 元", ase_zone)
-    sw_c4.metric("即時換股比值 (門檻 >= 1.18)", f"{swap_ratio:.3f}", f"換股後淨現金 {swap_net_cash:+,.0f} 元")
+    # 1. 換強短單獨立分帳停損監控卡 (11/23 日月光 300 股 @474)
+    st.markdown("#### ⚡ 【模組三之一：淨降倉換強短單獨立分帳停損監控（嚴格與傳家寶 3 張切割）】")
+    if sb_shares_3711_short > 0:
+        short_pnl = round((p_3711 - sb_short_3711_be) * sb_shares_3711_short, 0)
+        short_pnl_pct = round(((p_3711 - 474.0) / 474.0) * 100.0, 2)
+        hit_stop_ma5 = (p_3711 < ma5_3711)
+        hit_stop_be = (p_3711 < sb_short_3711_be)
+        trigger_exit = hit_stop_ma5 or hit_stop_be
+        sl_cls = "short-ledger-stop" if trigger_exit else "short-ledger-ok"
+        sl_status = (
+            f"🚨 【觸發獨立短單停損撤退！】現價 {p_3711:.1f} 已跌破 {'5MA(' + str(ma5_3711) + ')' if hit_stop_ma5 else ''} {'/ ' if (hit_stop_ma5 and hit_stop_be) else ''}{'損益平衡價(' + str(sb_short_3711_be) + ')' if hit_stop_be else ''} ➔ 嚴守 v24.3 紀律 5 立即撤退，絕不變長單！"
+            if trigger_exit
+            else f"✅ 【短單安全續抱中】現價 {p_3711:.1f} 穩守 5MA ({ma5_3711:.1f}) 與損益平衡價 ({sb_short_3711_be:.2f}) 之上！"
+        )
+        st.markdown(clean_html(f"""
+        <div class="{sl_cls}">
+        <b>🎯 11/23 淨降倉換強短單：日月光投控 (3711) 盤中零股 {sb_shares_3711_short:,} 股（成交均價 474.00 元 ｜ 持有成本 142,402 元）</b><br>
+        • <b>即時損益</b>：現價 <b>{p_3711:.2f} 元</b>（帳面預估 <b>{short_pnl:+,.0f} 元 / {short_pnl_pct:+.2f}%</b>）｜ <b>雙重硬防線</b>：日 5MA = <b>{ma5_3711:.2f} 元</b> ／ 損益平衡價 = <b>{sb_short_3711_be:.2f} 元</b><br>
+        • <b>即時紀律裁決</b>：<b style="font-size:16px;">{sl_status}</b><br>
+        • <i>（註：此筆 300 股與水庫二傳家寶現股 3,000 股 @172.67 完全分帳管理，絕不混帳攤平）</i>
+        </div>
+        """), unsafe_allow_html=True)
+    else:
+        st.info("目前無進行中之換強短單零股部位。")
 
-    st.markdown(clean_html(f"""
-    <div class="swap-card">
-    • <b>📐 換股公式即時演算</b>：賣出 (2張力成 {2000*p_6239:,.0f} ＋ 1張欣銓 {1000*p_3264:,.0f} ＝ <b>{swap_sell_twd:,.0f} 元</b>) － 買進 1張日月光 (<b>{1000*p_3711:,.0f} 元</b>) － 預估稅費 3,000 元 ＝ <b style="color:#ffd54f; font-size:17px;">淨剩餘現金 {swap_net_cash:+,.0f} 元</b><br>
-    • <b>🚦 即時換股決策燈號</b>：<b style="font-size:16.5px; color:#00e676;">{swap_signal}</b><br>
-    • <b>📏 日月光四區間基準</b>：🔴 高風險 `&gt;= 455` ｜ 🟡 過渡 `420～454` ｜ 🟢 合理 `360～415` ｜ 💎 鐵板 `300～345`（開板有量才執行，不殺跌停市價）
-    </div>
-    """), unsafe_allow_html=True)
+    # 2. 通用雙股比價換龍頭試算器 (對接 v24.3 模組 0/18)
+    st.markdown("#### ⚖️ 【模組三之二：通用雙股比價換龍頭計算機（對接 v24.3 折價 10%～15% 豁免門檻）】")
+    sw_p1, sw_p2, sw_p3 = st.columns([2.2, 1.4, 1.4])
+    swap_preset = sw_p1.selectbox(
+        "🔄 選擇比價換股組合",
+        ["🏦 玉山金(2884) 換 富邦金(2881) [金融換龍頭]", "🔬 力成(6239) 換 日月光(3711) [封測剩餘1張換龍頭]", "⚙️ 自訂任意兩檔比價"],
+        key="swap_preset_sel"
+    )
+    if "玉山金" in swap_preset:
+        c_sell_def, c_buy_def = "2884", "2881"
+    elif "力成" in swap_preset:
+        c_sell_def, c_buy_def = "6239", "3711"
+    else:
+        c_sell_def, c_buy_def = "2884", "2881"
 
-    st.markdown("#### 🔄 【模組三之二：00400A 滾動合理退場試算 ＆ 月配低波債券 (00985B / 00713) 進場殖利率反推】")
+    c_sell = sw_p2.text_input("賣出股代號 (弱/次龍頭)", value=c_sell_def, key="sw_cs").strip()
+    c_buy = sw_p3.text_input("買入目標代號 (龍頭)", value=c_buy_def, key="sw_cb").strip()
+
+    if len(c_sell) == 4 and len(c_buy) == 4:
+        inf_s, inf_b = price_dict_all.get(c_sell, {}), price_dict_all.get(c_buy, {})
+        nm_s, mkt_s = inf_s.get("name", c_sell), inf_s.get("market", "TW")
+        nm_b, mkt_b = inf_b.get("name", c_buy), inf_b.get("market", "TW")
+        ps_live = get_live_p(c_sell, inf_s.get("close", 100.0) or 100.0)
+        pb_live = get_live_p(c_buy, inf_b.get("close", 100.0) or 100.0)
+        pair_stat = fetch_pair_swap_history(c_sell, mkt_s, c_buy, mkt_b, ps_live, pb_live)
+
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric(f"賣出：{nm_s} ({c_sell})", f"{ps_live:.2f} 元")
+        sc2.metric(f"買入：{nm_b} ({c_buy})", f"{pb_live:.2f} 元")
+        sc3.metric("當下換股比 (賣幾張換1張龍頭)", f"{pair_stat['curr_ratio']:.3f} 張", f"240日中位數 {pair_stat['median_ratio']:.3f} 張")
+        sc4.metric("相對常態折價幅度", f"{pair_stat['discount_pct']:+.1f}%", "門檻：>= +10% ~ +15%")
+
+        disc_v = pair_stat["discount_pct"]
+        if disc_v >= 15.0:
+            pair_verdict = f"💎 【超值換龍頭綠燈！】相對 240 日常態比折價達 +{disc_v:.1f}% (≧15%)，符合 v24.3 紅燈豁免 (b)，確認龍頭基本面無永久惡化後可執行同曝險換龍頭！"
+        elif disc_v >= 10.0:
+            pair_verdict = f"🟢 【達標換龍頭觀察區！】相對常態比折價 +{disc_v:.1f}% (落在 10%~15% 划算區)，可於 09:15 後流動性穩定時分批換手！"
+        elif disc_v >= 0.0:
+            pair_verdict = f"🟡 【折價尚不足 (+{disc_v:.1f}%)】雖略便宜於常態，但尚未達 10% 黃金折價門檻，建議續抱觀望或靜待利空錯殺！"
+        else:
+            pair_verdict = f"🔴 【溢價不划算 ({disc_v:.1f}%)】目前換入龍頭比平常更貴，嚴禁盲目追換！"
+
+        st.markdown(clean_html(f"""
+        <div class="swap-card">
+        • <b>📐 比價歷史區間（近 240 交易日）</b>：最低 <b>{pair_stat['min_ratio']:.3f} 張</b> ～ 中位數 <b>{pair_stat['median_ratio']:.3f} 張</b> ～ 最高 <b>{pair_stat['max_ratio']:.3f} 張</b> ｜ 目前即時比值：<b>{pair_stat['curr_ratio']:.3f} 張 {nm_s} 換 1 張 {nm_b}</b><br>
+        • <b>🚦 v24.3 模組 0/18 比價裁決</b>：<b style="color:#00e676; font-size:15.5px;">{pair_verdict}</b><br>
+        • <b>🛡️ 執行鐵律</b>：紅燈期換股避開 <b>09:00-09:10</b> 恐慌低點，改於 <b>09:15 後</b> 同步對敲換手，並先確認目標龍頭無治理/基本面永久惡化！
+        </div>
+        """), unsafe_allow_html=True)
+
+    # 3. 00400A 務實滾動退場 ＆ 00985B / 00713 統一欄位殖利率表 (根除 Bug 2 & Bug 3)
+    st.markdown("#### 🔄 【模組三之三：00400A 務實滾動退場試算 ＆ 水庫三 (00985B / 00713) 進場殖利率反推】")
     div_985_ttm, div_985_ann = etf_m["00985B"]["div_ttm"], etf_m["00985B"]["div_latest"] * 12.0
     div_713_ttm = etf_m["00713"]["div_ttm"]
     y_985_ttm = round(div_985_ttm / max(0.1, p_00985b) * 100.0, 2)
@@ -2665,61 +3018,69 @@ with tab2:
 
     st.markdown(clean_html(f"""
     <div class="tab-guide-box" style="border-left-color:#fbbf24;">
-    <b>⚠️ 00400A 處置原則（不建議再加碼・動態滾動退場轉債）</b>：<br>
-    • <b>最新配息警訊</b>：00400A 現價 <b>{p_00400a:.2f} 元</b>（持 {sb_lots_00400a:.0f} 張 @14.40），12/08 除息已由 0.12 元腰斬至 <b>0.06 元</b>；<b>不建議再加碼，亦嚴禁買進 00406A (賣Call陷阱) 與 00953B/00945B (垃圾債)</b>。<br>
-    • <b>動態滾動退場價區</b>：第一批減碼區 <b style="color:#ffd54f;">{etf_m['00400A']['exit_t1']:.2f} 元</b>（10MA={etf_m['00400A']['ma10']:.2f} / 0.382反彈位）；第二批主力退場區 <b style="color:#00e676;">{etf_m['00400A']['exit_t2']:.2f} 元</b>（20MA={etf_m['00400A']['ma20']:.2f} / 0.50反彈位）。<br>
-    • <b>即時轉債試算</b>：若將 {sb_lots_00400a:.0f} 張 00400A（約 <b>{sell_400a_val/10000:.1f} 萬元</b>）全數轉入 <b>00985B ({p_00985b:.2f}元)</b>，可換得約 <b>{conv_985b_lots:.1f} 張</b>，每年立刻鎖定約 <b style="color:#00e676;">{conv_985b_annual_inc:,.0f} 元</b>（約 {conv_985b_annual_inc/12:,.0f} 元/月）RR2 低波債息！
+    <b>⚠️ 00400A 處置原則（永久停扣・務實滾動退場轉債）</b>：<br>
+    • <b>現況與禁買紅線</b>：00400A 現價 <b>{p_00400a:.2f} 元</b>（持 {sb_lots_00400a:.0f} 張 @14.40），12/08 除息已由 0.12 元腰斬至 <b>0.06 元</b>；<b>嚴禁再加碼，亦嚴禁買進 00406A (賣Call陷阱) 與 00953B/00945B (垃圾債)</b>。<br>
+    • <b>務實滾動退場區（已加入急殺收斂上限防錯過逃命波）</b>：第一批減碼區 <b style="color:#ffd54f;">{etf_m['00400A']['exit_t1']:.2f} 元</b>（10MA={etf_m['00400A']['ma10']:.2f} 收斂）；第二批主力退場區 <b style="color:#00e676;">{etf_m['00400A']['exit_t2']:.2f} 元</b>（20MA={etf_m['00400A']['ma20']:.2f} 收斂）。<br>
+    • <b>即時轉債效益</b>：若將 {sb_lots_00400a:.0f} 張 00400A（約 <b>{sell_400a_val/10000:.1f} 萬元</b>）全數轉入 <b>00985B ({p_00985b:.2f}元)</b>，可換得約 <b>{conv_985b_lots:.1f} 張</b>，每年立刻鎖定約 <b style="color:#00e676;">{conv_985b_annual_inc:,.0f} 元</b>（約 {conv_985b_annual_inc/12:,.0f} 元/月）RR2 低波債息！
     </div>
     """), unsafe_allow_html=True)
 
+    # 統一欄位名稱，徹底根除 None 分裂問題
     df_bond_yield = pd.DataFrame([
         {
-            "水庫三核心標的": "00985B 群益ESG投等債0-5 (月配65%)", "即時現價": f"{p_00985b:.2f} 元",
+            "水庫三核心標的": "00985B 群益ESG投等債0-5 (月配65%)",
+            "即時現價": f"{p_00985b:.2f} 元",
             "近一年/最新年化配息": f"TTM {div_985_ttm:.3f}元 / 年化 {div_985_ann:.3f}元",
             "目前殖利率": f"TTM {y_985_ttm:.2f}% / 年化 {y_985_ann:.2f}%",
-            "💎 超值重錘區 (>=6.0%)": f"<= {div_985_ttm/0.06:.2f} ~ {div_985_ann/0.06:.2f} 元",
-            "✅ 合理建倉區 (5.5%~6.0%)": f"{div_985_ann/0.06:.2f} ~ {div_985_ann/0.055:.2f} 元",
-            "⚖️ 底線進場價 (>=5.0%)": f"<= {div_985_ttm/0.05:.2f} ~ {div_985_ann/0.05:.2f} 元",
+            "💎 超值重錘區": f"(≧6.0%) <= {div_985_ttm/0.06:.2f} ~ {div_985_ann/0.06:.2f} 元",
+            "✅ 合理建倉區": f"(5.5%~6.0%) {div_985_ann/0.06:.2f} ~ {div_985_ann/0.055:.2f} 元",
+            "⚖️ 底線進場價": f"(≧5.0%) <= {div_985_ttm/0.05:.2f} ~ {div_985_ann/0.05:.2f} 元",
             "當前買點判定": "💎 超值建倉區！" if y_985_ann >= 6.0 else ("✅ 合理建倉區" if y_985_ann >= 5.5 else "⚖️ 達5%底線")
         },
         {
-            "水庫三核心標的": "00713 元大台灣高息低波 (季配35%)", "即時現價": f"{p_00713:.2f} 元",
-            "近一年/最新年化配息": f"TTM {div_713_ttm:.2f}元", "目前殖利率": f"TTM {y_713_ttm:.2f}%",
-            "💎 超值重錘區 (>=7.0%)": f"<= {div_713_ttm/0.07:.2f} 元",
-            "✅ 合理建倉區 (6.0%~7.0%)": f"{div_713_ttm/0.07:.2f} ~ {div_713_ttm/0.06:.2f} 元",
-            "⚖️ 底線進場價 (>=5.5%)": f"<= {div_713_ttm/0.055:.2f} 元",
+            "水庫三核心標的": "00713 元大台灣高息低波 (季配35%)",
+            "即時現價": f"{p_00713:.2f} 元",
+            "近一年/最新年化配息": f"TTM {div_713_ttm:.2f}元",
+            "目前殖利率": f"TTM {y_713_ttm:.2f}%",
+            "💎 超值重錘區": f"(≧7.0%) <= {div_713_ttm/0.07:.2f} 元",
+            "✅ 合理建倉區": f"(6.0%~7.0%) {div_713_ttm/0.07:.2f} ~ {div_713_ttm/0.06:.2f} 元",
+            "⚖️ 底線進場價": f"(≧5.5%) <= {div_713_ttm/0.055:.2f} 元",
             "當前買點判定": "💎 超值重錘區" if y_713_ttm >= 7.0 else ("✅ 合理建倉區！" if y_713_ttm >= 6.0 else "⚖️ 觀察區")
         }
     ])
     st.dataframe(df_bond_yield, use_container_width=True, hide_index=True)
 
-    st.markdown("#### 💧 【模組三之三：全資產四水庫即時市值、半導體集中度與被動現金流進度】")
+    # 4. 四水庫即時市值與半導體集中度
+    st.markdown("#### 💧 【模組三之四：11/23 最新全資產四水庫市值、半導體集中度與被動現金流進度】")
     r_c1, r_c2, r_c3, r_c4 = st.columns(4)
     r_c1.metric("💰 全資產即時估值 (零槓桿)", f"{total_assets/10000:,.1f} 萬元", f"匯率 {fx_now:.3f}")
     r_c2.metric("🔬 半導體總曝險佔比", f"{semi_ratio_pct:.1f}%", "⚠️ >50% 須靠水庫三平衡" if semi_ratio_pct > 50 else "✅ 配置均衡", delta_color="inverse")
-    r_c3.metric("🌊 水庫三累積進度 (目標200萬)", f"{val_r3/10000:,.1f} / 200 萬", f"達成率 {min(100.0, val_r3/2000000*100):.1f}%")
-    r_c4.metric("🔫 水庫四機動彈藥 (SGOV+USD)", f"{val_r4/10000:,.1f} 萬元", f"SGOV 30股 + ${sb_usd_cash:,.0f}")
+    r_c3.metric("🌊 水庫三累積進度 (目標200萬)", f"{val_r3/10000:,.1f} / 200 萬", f"00985B {sb_lots_00985b:.0f}張 ({val_r3/2000000*100:.1f}%)")
+    r_c4.metric("🔫 水庫四機動彈藥 (SGOV+現金)", f"{val_r4/10000:,.1f} 萬元", f"含台幣現金 {sb_twd_cash_wan:.1f}萬 + USD")
 
     df_res_table = pd.DataFrame([
         {"水庫分類": "水庫一：生活＋急用雙水庫 (永不動用)", "核心組成": "日常 20萬 ＋ 急用定存 20萬 (撐9個月開銷)", "即時市值(萬)": round(val_r1/10000, 1), "佔比(%)": round(val_r1/total_assets*100, 1)},
         {"水庫分類": "水庫二：傳家寶底倉 — 台股半導體", "核心組成": f"台積電4張(@{p_2330:,.0f}) ＋ 日月光3張(@{p_3711:,.0f})", "即時市值(萬)": round(val_r2_tw_semi/10000, 1), "佔比(%)": round(val_r2_tw_semi/total_assets*100, 1)},
         {"水庫分類": "水庫二：傳家寶底倉 — 台股金融股息", "核心組成": "玉山金100.45張、富邦金11.74張、台中銀27.15張、台新新光金/臺企銀", "即時市值(萬)": round(val_r2_tw_fin/10000, 1), "佔比(%)": round(val_r2_tw_fin/total_assets*100, 1)},
         {"水庫分類": "水庫二：傳家寶底倉 — 美股 AI 龍頭", "核心組成": f"AVGO 35股(${p_avgo:.2f}) ＋ NVDA 80股(${p_nvda:.2f})", "即時市值(萬)": round(val_r2_us_semi/10000, 1), "佔比(%)": round(val_r2_us_semi/total_assets*100, 1)},
-        {"水庫分類": "水庫三：第二道現金流 (目標200萬)", "核心組成": f"00985B {sb_lots_00985b:.1f}張 (65%) ＋ 00713 {sb_lots_00713:.1f}張 (35%)", "即時市值(萬)": round(val_r3/10000, 1), "佔比(%)": round(val_r3/total_assets*100, 1)},
-        {"水庫分類": "水庫四：跨市機動抄底彈藥", "核心組成": f"SGOV 30股(${p_sgov:.2f}) ＋ ${sb_usd_cash:,.0f} 美元現金", "即時市值(萬)": round(val_r4/10000, 1), "佔比(%)": round(val_r4/total_assets*100, 1)},
-        {"水庫分類": "待汰弱與比價換股衛星部位", "核心組成": f"力成{sb_lots_6239:.1f}張 ＋ 欣銓{sb_lots_3264:.1f}張 ＋ 00400A {sb_lots_00400a:.0f}張", "即時市值(萬)": round((val_sat_semi+val_sat_400a)/10000, 1), "佔比(%)": round((val_sat_semi+val_sat_400a)/total_assets*100, 1)}
+        {"水庫分類": "水庫三：第二道現金流 (目標200萬)", "核心組成": f"00985B {sb_lots_00985b:.1f}張(@10.38) ＋ 00713 {sb_lots_00713:.1f}張", "即時市值(萬)": round(val_r3/10000, 1), "佔比(%)": round(val_r3/total_assets*100, 1)},
+        {"水庫分類": "水庫四：跨市機動彈藥 (含11/23淨收回現金)", "核心組成": f"台幣機動現金 {sb_twd_cash_wan:.1f}萬 ＋ SGOV 30股(${p_sgov:.2f}) ＋ ${sb_usd_cash:,.0f}", "即時市值(萬)": round(val_r4/10000, 1), "佔比(%)": round(val_r4/total_assets*100, 1)},
+        {"水庫分類": "獨立分帳：淨降倉換強短單", "核心組成": f"日月光零股 {sb_shares_3711_short}股(@474 / 平衡價{sb_short_3711_be:.2f})", "即時市值(萬)": round(val_short_3711/10000, 1), "佔比(%)": round(val_short_3711/total_assets*100, 1)},
+        {"水庫分類": "待汰弱與退場衛星部位", "核心組成": f"力成{sb_lots_6239:.1f}張(@245.75) ＋ 欣銓{sb_lots_3264:.1f}張 ＋ 00400A {sb_lots_00400a:.0f}張", "即時市值(萬)": round((val_sat_semi+val_sat_400a)/10000, 1), "佔比(%)": round((val_sat_semi+val_sat_400a)/total_assets*100, 1)}
     ])
     st.dataframe(df_res_table, use_container_width=True, hide_index=True)
 
-    with st.expander("📦 次要收合：0050／0050正2 母子艦隊紀錄（目前已全數清空 0 張）", expanded=False):
-        st.caption(f"0050正2 (00631L) 現價：{etf_m['00631L']['p']:.2f} 元（5MA={etf_m['00631L'].get('ma5', 0):.2f} / 20MA={etf_m['00631L'].get('ma20', 0):.2f}）｜ 目前已全數清空，依股災雙雷達總開關控管，落底達 4/5 前嚴禁開啟槓桿。")
+    with st.expander("📦 次要收合：0050／0050正2 紀錄（目前已全數清空 0 張）", expanded=False):
+        st.caption(f"0050正2 (00631L) 現價：{etf_m['00631L']['p']:.2f} 元（5MA={etf_m['00631L'].get('ma5', 0):.2f} / 20MA={etf_m['00631L'].get('ma20', 0):.2f}）｜ 已全數清空，依模組 0 雙雷達控管，落底達 4/5 前嚴禁開啟槓桿。")
 
 # ==================== TAB 3: 短線旱地拔蔥榜 ====================
 with tab3:
-    if radar["master_state"] == "LOCKED":
-        st.error(f"🚨 【淘金客 v24.1 股災總開關紅燈鎖定中（預警 {radar['w_count']}/5・落底 {radar['b_count']}/5）】目前嚴禁追買短線突破股！已自動排除「ADX>25 且 -DI>+DI」空頭加速股與「BIAS10 > +12%」極度過熱股。")
+    if radar["master_state"] == "RED_LOCKED":
+        st.error(f"🚨 【淘金客 v24.3 紅燈鎖定（預警 {radar['w_count']}/5・落底 {radar['b_count']}/5）】嚴禁動用新現金追買！已自動排除「ADX>25 且 -DI>+DI」空頭加速股與「BIAS10 > +12%」極度過熱股，下方清單僅供落底優先候補觀察。")
+    elif radar["master_state"] == "YELLOW":
+        st.warning("🟡 【黃燈前哨警戒】禁止追高並優先收網多頭衛星股，僅限新穀倉1／防彈衣且無3日事件雷者小額試單。")
     else:
-        st.success(f"{radar['master_badge']} ｜ 已套用 5 組量化接軌指標（DMI雙檢 / BIAS兩段式煞車 / 假突破三合一 / OBV+RS20D+大戶 / ATR%波動尺），請至 Tab 1 匯出模式 A 批次包給淘金客守門！")
+        st.success(f"{radar['master_badge']} ｜ 已套用 5 組量化接軌指標，請至 Tab 1 匯出模式 A 批次包給淘金客 v24.3 守門！")
 
     st.markdown("#### 🔥 【表 1-A：短線看技術＋基本面（站穩月線＋DMI多方＋雙成長・已排除高ADX空頭加速與極度過熱）】")
     if not df_launch_fund.empty: st.dataframe(style_tw_stock_df(pin_code_name_index(df_launch_fund)), use_container_width=True)
@@ -2739,8 +3100,8 @@ with tab3:
 
 # ==================== TAB 4: 長線波段與 MSCI 動態主流池 ====================
 with tab4:
-    if radar["master_state"] == "LOCKED":
-        st.warning("🚨 股災總開關紅燈鎖定中：表 3-B 與 MSCI 清單保留顯示但已強制標註「空頭加速（防高ADX假多頭）」與「ATR%高波動」，請待落底共振達 4/5 再分批進場！")
+    if radar["master_state"] == "RED_LOCKED":
+        st.warning("🚨 紅燈鎖定中：表 3-B 與 MSCI 清單保留顯示但已強制標註「空頭加速」與「ATR%高波動」，請待落底共振達 4/5 再解封新資金分 3 批存股！")
 
     st.markdown(f"#### 🌐 【模組四：MSCI 每季動態納入/移除名單 × 受影響族群龍頭與當日熱門股連動】（當前季度：`{msci_data['quarter']}`）")
     with st.expander("🔄 每季公告日一鍵更新：貼上最新 MSCI 季度調整公告文字，3 秒自動解析並永久儲存", expanded=False):
@@ -2750,8 +3111,7 @@ with tab4:
             if raw_msci_txt.strip():
                 parsed_m = parse_msci_text_override(raw_msci_txt, price_dict_all, q_lbl)
                 try:
-                    with open(MSCI_CACHE_FILE, "w", encoding="utf-8") as f:
-                        json.dump(parsed_m, f, ensure_ascii=False)
+                    with open(MSCI_CACHE_FILE, "w", encoding="utf-8") as f: json.dump(parsed_m, f, ensure_ascii=False)
                     fetch_dynamic_msci_data.clear()
                     st.success("✅ 已解析並儲存最新季度 MSCI 名單！請點上方「重抓」按鈕套用。")
                 except Exception as e:
@@ -2879,7 +3239,7 @@ with tab6:
 
         df_display_rev = df_filtered.drop(columns=["_tdcc_num"], errors="ignore")
         csv_bytes = df_display_rev.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-        st.download_button(label=f"📥 下載當前篩選月營收與法人估值表 ({len(df_display_rev)} 家) CSV", data=csv_bytes, file_name=f"tw_rev_v60_{target_latest_ym}.csv", mime="text/csv")
+        st.download_button(label=f"📥 下載當前篩選月營收與法人估值表 ({len(df_display_rev)} 家) CSV", data=csv_bytes, file_name=f"tw_rev_v61_{target_latest_ym}.csv", mime="text/csv")
 
         def color_rev_val(val):
             try:
