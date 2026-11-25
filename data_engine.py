@@ -446,7 +446,15 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
         )
         if r_mis.status_code == 200:
             q_list = r_mis.json().get("RtData", {}).get("QuoteList", [])
-            near_rows = [q for q in q_list if str(q.get("SymbolID", "")).startswith("TXF") and ("/" not in str(q.get("SymbolID", ""))) and str(q.get("CLastPrice", "")).replace(",", "").replace(".", "").isdigit()]
+            near_rows = [
+                q for q in q_list
+                if str(q.get("SymbolID", "")).strip().startswith("TXF")
+                and ("-" not in str(q.get("SymbolID", "")))
+                and ("/" not in str(q.get("SymbolID", "")))
+                and ("現貨" not in str(q.get("DispCName", "")))
+                and str(q.get("CLastPrice", "")).replace(",", "").replace(".", "").isdigit()
+                and float(str(q.get("CLastPrice", "0")).replace(",", "")) > 5000
+            ]
             if near_rows:
                 c_tx = float(str(near_rows[0]["CLastPrice"]).replace(",", ""))
                 q_date_iso = parse_roc_or_iso_date(near_rows[0].get("CDate", ""))
