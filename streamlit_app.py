@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime, os, json, time, re
 
-st.set_page_config(page_title="台股每日戰情室 v63.1", page_icon="🚨", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="台股每日戰情室 v64.0", page_icon="🚨", layout="wide", initial_sidebar_state="auto")
 
 st.markdown("""
 <style>
@@ -14,6 +14,8 @@ st.markdown("""
 .event-banner-blue { background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%); color: #e2e8f0; padding: 11px 18px; border-radius: 10px; border: 1px solid #38bdf8; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
 .radar-grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 14px; margin: 12px 0 16px 0; }
 .radar-panel { background: rgba(15, 23, 42, 0.85); border-radius: 12px; padding: 15px 18px; font-size: 14.8px; line-height: 1.7; border: 1px solid rgba(255,255,255,0.18); }
+.forecast-grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); gap: 12px; margin: 10px 0 16px 0; }
+.forecast-card { overflow-wrap: anywhere; word-break: break-word; box-shadow: 0 4px 12px rgba(0,0,0,0.22); }
 .war-score-title { font-size: 24px; font-weight: 900; color: #ffd54f; margin-bottom: 8px; line-height: 1.4; }
 .war-dim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; margin: 12px 0 16px 0; }
 .war-dim-item { background: rgba(255,255,255,0.08); padding: 13px 16px; border-radius: 10px; font-size: 14.6px; line-height: 1.68; }
@@ -25,15 +27,15 @@ st.markdown("""
 .short-ledger-stop { background: #2d0f14; color: #fff; border-radius: 12px; padding: 15px 19px; border: 2px solid #ff4d4f; margin-bottom: 14px; line-height: 1.7; }
 .svg-zoom-box { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; background: #09111a; }
 .svg-zoom-box img { max-width: none !important; }
-.war-hero-box, .war-hero-box-danger, .war-hero-box-warn, .radar-panel, .war-dim-item, .swap-card, .short-ledger-ok, .short-ledger-stop, .tab-guide-box, .event-banner-red, .event-banner-yellow, .event-banner-blue { overflow-wrap: anywhere; word-break: break-word; }
+div[data-testid="stMarkdownContainer"] { overflow-wrap: anywhere; word-break: break-word; }
 
 @media (max-width: 768px) {
     .war-hero-box, .war-hero-box-danger, .war-hero-box-warn { padding: 13px 13px; border-left-width: 5px; }
     .war-score-title { font-size: 18px; }
     .war-score-idx { font-size: 25px !important; display: inline-block; }
     .war-sub-title { font-size: 16px !important; }
-    .radar-grid-2, .war-dim-grid { grid-template-columns: 1fr !important; gap: 10px; }
-    .radar-panel, .war-dim-item { padding: 11px 12px; font-size: 13.6px; line-height: 1.6; }
+    .radar-grid-2, .war-dim-grid, .forecast-grid-3 { grid-template-columns: 1fr !important; gap: 10px; }
+    .radar-panel, .war-dim-item, .forecast-card { padding: 11px 12px !important; font-size: 13.6px !important; line-height: 1.6 !important; }
     .war-dim-concl { font-size: 14.6px; }
     .meaning-note { font-size: 12.6px; }
     .event-banner-red, .event-banner-yellow, .event-banner-blue { font-size: 13.5px; padding: 10px 12px; }
@@ -58,9 +60,10 @@ from data_engine import (
     scan_all_stocks_on_demand, fetch_all_monthly_revenue_df_on_demand, verify_24m_first_breakout_batch
 )
 from charts_ui import (
-    evaluate_crash_and_bottom_radar_v244, build_event_timeline_svg_html,
+    build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
+    build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
     build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
-    build_forecast_mobile_cards_html, compute_tw_hot_sectors,
+    build_forecast_responsive_cards_html, compute_tw_hot_sectors,
     build_8_indicator_panels_html, build_market_outpost_line_v244,
     build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
 )
@@ -72,7 +75,7 @@ ZOOM_OPT_MAP = {"自適應 (預設)": "auto", "🔍 1.5x 放大": "1.5x", "🔎 
 # ==========================================
 now_tw_dt = get_tw_now()
 now_str = now_tw_dt.strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🚨 台股每日戰情室 v63.1 (手機/電腦雙棲 RWD ＋ 浮動三情境預測 ＋ 8 大指標 ＋ 淘金客 v24.4)")
+st.markdown("## 🚨 台股每日戰情室 v64.0 (夜盤＋當日3日推演＋法人現貨＆信用利差＋雙棲 RWD＋淘金客 v24.4)")
 
 btn_c1, btn_c2, btn_c3, btn_c4 = st.columns([1.8, 2.0, 1.5, 1.7])
 if btn_c1.button("⚡ 秒速刷新大盤與四水庫 (2秒)", use_container_width=True):
@@ -86,14 +89,14 @@ trigger_layer2_top = btn_c2.button("🚀 啟動／重掃全台個股池 (Layer 2
 
 if btn_c3.button("🔄 全域清快取重抓", use_container_width=True):
     st.cache_data.clear()
-    st.session_state.pop("v63_scan_data", None)
-    st.session_state.pop("v63_rev_df", None)
+    for k_pop in ["v64_scan_data", "v64_rev_df", "v63_scan_data", "v63_rev_df", "mode_b_pkg_txt", "ver_24m_map"]:
+        st.session_state.pop(k_pop, None)
     st.rerun()
 
 auto_refresh = btn_c4.checkbox("⏱️ 每 20 秒自動刷新大盤", value=False)
 
 # ================= LAYER 1：秒開大盤與個人核心資產 (3～5 秒) =================
-with st.spinner("⚡ Layer 1 秒開載入中：大盤三源最新日、期貨雙口徑 ΔOI、60分K扳機、40日歷史軌跡與四水庫..."):
+with st.spinner("⚡ Layer 1 秒開載入中：大盤三源最新日、台指期夜盤、三大法人現貨、信用利差與四水庫..."):
     fleet = fetch_and_analyze_fleet_fast()
     us_data = fetch_us_sectors_and_leaders()
 
@@ -111,18 +114,17 @@ tsm_q, nvda_q = us_data["quotes"].get("TSM", {}), us_data["quotes"].get("NVDA", 
 tsm_chg, tsm_ext = tsm_q.get("chg_pct", 0.0), (f" ({tsm_q['ext_label']})" if tsm_q.get("ext_label") else "")
 nvda_chg, nvda_ext = nvda_q.get("chg_pct", 0.0), (f" ({nvda_q['ext_label']})" if nvda_q.get("ext_label") else "")
 fx_now, fx_ma5, fx_chg_ntd = deriv["fx_now"], deriv["fx_ma5"], deriv["fx_chg_ntd"]
-# 修正微調 4：嚴格以當日未走貶 (fx_chg_ntd <= 0) 判定台幣止貶，當日走貶誠實顯示續貶
 fx_stopped_dep = bool(fx_chg_ntd <= 0.0)
-macro_withdrawal_alert = bool(tnx_val >= 5.0 and fx_now >= 32.50)
+macro_withdrawal_alert = bool((tnx_val >= 5.0 or us_data.get("credit_spread_alert", False)) and fx_now >= 32.50)
 
 def _run_layer2_scan():
-    with st.spinner("🔍 Layer 2 執行中：掃描全台 ~170 檔非殭屍股 K 線、5 組接軌指標 (DMI/BIAS/當沖/OBV/RS/ATR%)、MSCI 與宏爺穀倉..."):
-        st.session_state["v63_scan_data"] = scan_all_stocks_on_demand(fleet["twii_20d_ret"], macro_withdrawal_alert)
+    with st.spinner("🔍 Layer 2 執行中：掃描全台 ~170 檔非殭屍股 K 線、20MA扣抵、雙市處置/注意/除權息、個股Sum-Check與穀倉..."):
+        st.session_state["v64_scan_data"] = scan_all_stocks_on_demand(fleet["twii_20d_ret"], macro_withdrawal_alert)
 
 if trigger_layer2_top:
     _run_layer2_scan()
 
-scan_data = st.session_state.get("v63_scan_data", None)
+scan_data = st.session_state.get("v64_scan_data", None)
 price_dict_active = scan_data["price_dict"] if scan_data else fast_prices
 all_scanned_details = scan_data["all_details"] if scan_data else {}
 msci_data = scan_data["msci_data"] if scan_data else fetch_dynamic_msci_data(1)
@@ -130,12 +132,13 @@ msci_data = scan_data["msci_data"] if scan_data else fetch_dynamic_msci_data(1)
 # ================= 左側雙階讀取覆寫控制台 (手機自動收合，點左上角 > 展開) =================
 with st.sidebar:
     st.markdown("### 🎛️ 雙階讀取覆寫控制台 (全浮動)")
-    st.caption(f"📡 期貨：{deriv['fut_src']} ｜ 融資：{deriv['margin_src']} ｜ 價差：{deriv['basis_src']}")
+    night_cap = f" ｜ 🌙夜盤：{deriv['night_tx_close']:,.0f}({deriv['night_tx_chg']:+,.0f})" if deriv.get("night_valid") else ""
+    st.caption(f"📡 期貨：{deriv['fut_src']} ｜ 融資：{deriv['margin_src']} ｜ 價差：{deriv['basis_src']}{night_cap}")
     sb_fini_oi = st.number_input("外資台指期淨未平倉 (口)", value=int(deriv["fini_tx_oi"]), step=1000)
     sb_margin_2d = st.number_input("近2日上市融資增減 (億)", value=float(deriv["margin_2d_chg_yi"]), step=50.0, format="%.1f")
     sb_margin_2d_pct = st.number_input("近2日融資變動幅 (%)", value=float(deriv["margin_2d_pct"]), step=1.0, format="%.1f")
     sb_margin_dd = st.number_input("30日波段融資減幅 (%)", value=float(deriv["margin_30d_dd_pct"]), step=1.0, format="%.1f")
-    sb_maint = st.number_input("整戶融資維持率 (%，動態估算可覆寫)", value=float(deriv["stock_only_maint_pct"]), step=0.5, format="%.1f")
+    sb_maint = st.number_input("整戶融資維持率 (%，線性校準可覆寫)", value=float(deriv["stock_only_maint_pct"]), step=0.5, format="%.1f")
     sb_basis = st.number_input("期現貨價差 (點，負=逆價差)", value=float(deriv["basis_pts"]), step=20.0, format="%.0f")
     sb_basis_stable = st.checkbox("恐慌逆價差已達極點且不再擴大", value=False)
     sb_consec_cover = st.number_input("外資期貨連補天數 (日・ΔOI口徑)", value=int(deriv["consec_cover_days"]), min_value=0, max_value=15, step=1)
@@ -218,7 +221,6 @@ radar = evaluate_crash_and_bottom_radar_v244(
 forecast = compute_dynamic_market_forecast(fleet, radar, vix_now, sox_chg, upcoming_ev_rows, sb_fini_oi, deriv["fini_tx_oi_delta"])
 
 t_min_now = now_tw_dt.hour * 60 + now_tw_dt.minute
-is_panic_open_window = (radar["master_state"] == "RED_LOCKED") and (now_tw_dt.weekday() < 5) and (540 <= t_min_now <= 555)
 
 # 四水庫即時價格與資產市值試算
 def get_live_p(code_k, default_v):
@@ -261,7 +263,7 @@ holding_notes_map = {
     "00985B": f"水庫三低波債券 {sb_lots_00985b:.1f}張 (@10.38)"
 }
 
-outpost_line = build_market_outpost_line_v244(fleet, radar, deriv_eff, forecast, tnx_val, fx_now, sb_ban_active, next_ev)
+outpost_line = build_market_outpost_line_v244(fleet, radar, deriv_eff, forecast, tnx_val, fx_now, sb_ban_active, next_ev, us_data=us_data)
 
 if scan_data:
     df_launch = prioritize_granary_and_armor_df(scan_data["df_launch"], macro_withdrawal_alert, "實戰優先分")
@@ -285,19 +287,20 @@ else:
 # 六大功能分頁架構
 # ==========================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🚨 雙雷達＆預測＆8指標",
+    "🚨 總結＆雷達＆預測",
     "⚖️ 換股＆短單＆四水庫",
     f"⚡ 短線旱地拔蔥榜 {'✅' if scan_data else '💤'}",
     f"🏛️ 長線波段＆MSCI池 {'✅' if scan_data else '💤'}",
     f"🌾 穀倉與防墊料專區 {'✅' if scan_data else '💤'}",
-    f"📈 上市櫃月營收快篩 {'✅' if 'v63_rev_df' in st.session_state else '💤'}"
+    f"📈 上市櫃月營收快篩 {'✅' if 'v64_rev_df' in st.session_state else '💤'}"
 ])
 
 # ==================== TAB 1 ====================
 with tab1:
-    if is_panic_open_window:
-        st.error("⏰ 【模組 9 紅燈盤中紀律】目前為 09:00-09:15 恐慌集中賣壓區！減碼弱勢股或比價換股請避開此低點（除非瀕臨鎖跌停），改於 09:15 後流動性穩定或反彈遇壓執行！")
+    # 1. 盤中模組 9 全時段時間軸防呆條 ＋ 🌙 台指期夜盤即時預警
+    st.markdown(build_intraday_timeline_banner_html(now_tw_dt, radar["master_state"], deriv_eff, next_ev), unsafe_allow_html=True)
 
+    # 2. 加權指數 ＋ 模組 0 雙雷達主卡片
     hero_cls = "war-hero-box-danger" if radar["master_state"] == "RED_LOCKED" else ("war-hero-box-warn" if radar["master_state"] == "YELLOW" else "war-hero-box")
     idx_col = "#ff4d4f" if fleet["twii_chg_pct"] >= 0 else "#00e676"
     w_html = "<br>".join([f"{'🔴' if f else '⚪'} {txt}" for f, txt in radar["w_items"]])
@@ -330,7 +333,13 @@ with tab1:
     </div>
     """), unsafe_allow_html=True)
 
-    # 雙模式戰情數據包匯出中心 (對接淘金客 v24.4)
+    # 3. 還原升級：【📋 當日戰情總結 ＆ 未來 3 日多空推演卡】
+    st.markdown(build_daily_summary_and_3day_card_html(
+        fleet, radar, deriv_eff, us_data, forecast, next_ev,
+        p_3711, ma5_3711, sb_short_3711_be, sb_shares_3711_short, etf_m
+    ), unsafe_allow_html=True)
+
+    # 4. 雙模式戰情數據包匯出中心 (對接淘金客 v24.4)
     st.markdown("### 🤖 【淘金客 v24.4 雙腦互補：一鍵複製戰情數據包匯出中心】（防截斷核對 ＋ 右上角一鍵複製）")
     pkg_tab_a, pkg_tab_b = st.tabs(["🛡️ 按鈕 A：守門員快篩批次包（自動切批 5～6 檔）", "🔬 按鈕 B：決選深檢戰情包（1～3 檔＋持倉分帳＋季報防墊料）"])
 
@@ -379,7 +388,7 @@ with tab1:
             sel_b_codes = pb_c1.multiselect("🎯 勾選決選標的（最多 3 檔；含庫存股自動帶入成本與停損）：", options=all_opt_codes, default=default_b, max_selections=3, format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']} ({all_scanned_details[c]['現價']})", key="mode_b_ms")
             manual_b_str = pb_c2.text_input("⌨️ 或手動輸入 4 碼代號（逗號分隔，上限3檔）", value="", placeholder="例：3711, 2881, 2383", key="mode_b_manual")
         else:
-            st.caption("💡 尚未執行 Layer 2 時可直接輸入代號生成基礎深檢包（含季報防墊料、大戶週變動與大盤前哨）；若需完整 6 條均線與 5 組指標請先按【🚀 啟動全台個股池】。")
+            st.caption("💡 尚未執行 Layer 2 時可直接輸入代號生成基礎深檢包（含季報防墊料、大戶週變動與大盤前哨）；若需完整 6 條均線與 20MA 扣抵請先按【🚀 啟動全台個股池】。")
             sel_b_codes = []
             manual_b_str = st.text_input("⌨️ 直接輸入 1～3 檔 4 碼代號（逗號分隔）", value="3711, 6239", placeholder="例：3711, 2881, 2383", key="mode_b_manual_fast")
         manual_b_codes = [c for c in re.findall(r"\b(\d{4})\b", manual_b_str)][:3]
@@ -394,7 +403,7 @@ with tab1:
         if st.session_state.get("mode_b_pkg_txt"):
             st.code(st.session_state["mode_b_pkg_txt"], language="text")
 
-    # v63.1 校準版走勢圖：縮放控制列 ＋ 原圖下載 ＋ 手機/電腦雙棲作戰視圖
+    # 5. 左側 40 日真實歷史 ＋ 右側全浮動三情境預測走勢圖（可放大＋原圖下載）
     fc_ctrl1, fc_ctrl2 = st.columns([3.2, 1.8])
     fc_zoom_lbl = fc_ctrl1.radio("🔍 走勢圖縮放倍率（手機可單指橫滑）", list(ZOOM_OPT_MAP.keys()), horizontal=True, key="fc_svg_zoom")
     svg_raw_bytes = build_realtime_forecast_svg_raw(fleet, radar, forecast).encode("utf-8")
@@ -407,14 +416,15 @@ with tab1:
     )
     st.markdown(build_realtime_and_forecast_svg_html(fleet, radar, forecast, zoom_mode=ZOOM_OPT_MAP[fc_zoom_lbl]), unsafe_allow_html=True)
 
-    st.markdown("#### 🔮 【未來 1～4 週大盤走勢預測與三情境作戰表】（100% 動態浮動：每日依均線、ATR、外資ΔOI與事件重算）")
-    fc_view_mode = st.radio("📱 顯示樣式切換", ["📊 表格模式 (電腦)", "📱 直式卡片 (手機推薦)"], horizontal=True, key="fc_view_mode")
+    # 6. 未來 1～4 週三情境作戰表：預設採全響應式防切字卡片（電腦3欄並排／手機1欄直排）
+    st.markdown("#### 🔮 【未來 1～4 週大盤走勢預測與三情境作戰卡片】（100% 自動換行零裁切・每日浮動重算）")
+    fc_view_mode = st.radio("📱 顯示樣式切換", ["🃏 響應式防切字卡片 (電腦/手機預設)", "📊 簡表模式 (供複製)"], horizontal=True, key="fc_view_mode_v64")
     if "卡片" in fc_view_mode:
-        st.markdown(build_forecast_mobile_cards_html(forecast), unsafe_allow_html=True)
+        st.markdown(build_forecast_responsive_cards_html(forecast), unsafe_allow_html=True)
     else:
         st.dataframe(pd.DataFrame(forecast["table_rows"]), use_container_width=True, hide_index=True)
 
-    # 8 大【先結論、後數據、附數字含意】評估面板
+    # 7. 8 大【先結論、後數據、附數字含意】評估面板 (含夜盤、大盤法人現貨Sum-Check、HYG/LQD信用利差)
     st.markdown(build_8_indicator_panels_html(
         fleet, us_data, deriv_eff, breadth, scan_data, tw_hot_sec_info,
         sb_fini_oi, sb_margin_2d, sb_margin_2d_pct, sb_margin_dd, sb_maint, sb_basis,
@@ -422,6 +432,7 @@ with tab1:
         tnx_val, tnx_chg, sox_chg, tsm_chg, tsm_ext, nvda_chg, nvda_ext, fx_now, fx_stopped_dep
     ), unsafe_allow_html=True)
 
+    # 8. 大盤各級均線動態城堡導航表
     st.markdown("#### 🧭 【大盤各級均線動態城堡導航表】（含月 20MA 與月 36MA 股災鐵板）")
     def ma_row(nm, val, guide):
         diff = round(val - fleet["twii_now"], 0)
@@ -544,7 +555,7 @@ with tab2:
 # ==================== TAB 3: 短線旱地拔蔥榜 ====================
 with tab3:
     if not scan_data:
-        st.info("💤 【Layer 2 按需載入待機中】點下方按鈕才開始掃描全台 170 檔非殭屍股 K 線與 5 組接軌指標（掃完後與分頁四、五共用免重跑）。")
+        st.info("💤 【Layer 2 按需載入待機中】點下方按鈕才開始掃描全台 170 檔非殭屍股 K 線、20MA扣抵、處置/注意/除權息與 5 組接軌指標（掃完後與分頁四、五共用免重跑）。")
         if st.button("🚀 立即啟動全台個股掃描 (Layer 2)", type="primary", key="btn_l2_tab3"):
             _run_layer2_scan()
             st.rerun()
@@ -584,7 +595,7 @@ with tab4:
                 try:
                     with open(MSCI_CACHE_FILE, "w", encoding="utf-8") as f: json.dump(parsed_m, f, ensure_ascii=False)
                     fetch_dynamic_msci_data.clear()
-                    st.session_state.pop("v63_scan_data", None)
+                    st.session_state.pop("v64_scan_data", None)
                     st.success("✅ 已解析並儲存最新季度 MSCI 名單！請重新啟動 Layer 2 掃描套用。")
                 except Exception as e:
                     st.error(f"儲存失敗：{e}")
@@ -653,10 +664,10 @@ with tab6:
     rev_b1, rev_b2 = st.columns([2.5, 4.5])
     if rev_b1.button("📊 啟動／重抓 1,972 家上市櫃月營收與三率估值 (Layer 3)", type="primary", key="btn_l3_rev"):
         with st.spinner("📡 Layer 3 執行中：正在下載全市場 1,972 家最新月營收、法人買賣超與三率 EPS 估值..."):
-            st.session_state["v63_rev_df"] = fetch_all_monthly_revenue_df_on_demand()
+            st.session_state["v64_rev_df"] = fetch_all_monthly_revenue_df_on_demand()
             st.rerun()
 
-    df_all_rev = st.session_state.get("v63_rev_df", pd.DataFrame())
+    df_all_rev = st.session_state.get("v64_rev_df", pd.DataFrame())
     if df_all_rev.empty:
         rev_b2.info("💤 【Layer 3 按需載入待機中】點左側按鈕才爬取 1,972 家月營收與財報，避免拖慢每日開盤速度。")
     else:
@@ -705,7 +716,7 @@ with tab6:
                 v_col2.success(f"✅ 已完成 24 個月破繭驗證！共 {len(df_filtered)} 檔純破繭轉機股。")
 
         df_display_rev = df_filtered.drop(columns=["_tdcc_num"], errors="ignore")
-        st.download_button(label=f"📥 下載當前篩選月營收與法人估值表 ({len(df_display_rev)} 家) CSV", data=df_display_rev.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), file_name=f"tw_rev_v63_{target_latest_ym}.csv", mime="text/csv")
+        st.download_button(label=f"📥 下載當前篩選月營收與法人估值表 ({len(df_display_rev)} 家) CSV", data=df_display_rev.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), file_name=f"tw_rev_v64_{target_latest_ym}.csv", mime="text/csv")
 
         def color_rev_val(val):
             try:
