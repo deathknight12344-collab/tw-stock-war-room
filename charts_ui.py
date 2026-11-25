@@ -6,6 +6,28 @@ from config_events import clean_html, xml_esc, map_tw_theme_cluster
 from data_engine import fetch_single_stock_anti_trap
 
 # ==========================================
+# 共用：SVG 響應式縮放包裝器（電腦滿版／手機可單指橫滑／支援 1.5x・2.0x 放大）
+# ==========================================
+def _wrap_svg_zoom(svg_xml: str, zoom_mode: str = "auto") -> str:
+    b64_svg = base64.b64encode(svg_xml.encode("utf-8")).decode("utf-8")
+    if zoom_mode == "1.5x":
+        img_style = "width:150%; min-width:1100px; height:auto; display:block;"
+        hint = "🔍 目前為 1.5x 放大模式（左右滑動檢視細節）"
+        cls_img = "svg-fixed-img"
+    elif zoom_mode == "2.0x":
+        img_style = "width:200%; min-width:1500px; height:auto; display:block;"
+        hint = "🔍 目前為 2.0x 超大模式（左右滑動檢視細節）"
+        cls_img = "svg-fixed-img"
+    else:
+        img_style = "width:100%; height:auto; display:block;"
+        hint = "📱 手機版可單指左右滑動看大圖，或點上方倍率鍵放大"
+        cls_img = "svg-auto-img"
+    return (
+        f'<div class="svg-zoom-hint" style="font-size:12.5px; color:#93c5fd; margin:2px 0 5px 2px;">{hint}</div>'
+        f'<div class="svg-zoom-box"><img class="{cls_img}" src="data:image/svg+xml;base64,{b64_svg}" style="{img_style}" /></div>'
+    )
+
+# ==========================================
 # 1. 模組 0（對接淘金客 v24.4）：三階燈號 × 四軌落底 × 政策逃命波
 # ==========================================
 def evaluate_crash_and_bottom_radar_v244(
@@ -85,13 +107,13 @@ def evaluate_crash_and_bottom_radar_v244(
     }
 
 # ==========================================
-# 2. 滾動風險事件視覺化水平時間軸 SVG 圖
+# 2. 滾動風險事件視覺化水平時間軸 SVG 圖（支援手機滑動與倍率縮放）
 # ==========================================
-def build_event_timeline_svg_html(upcoming_rows: list[dict]) -> str:
+def build_event_timeline_svg_html(upcoming_rows: list[dict], zoom_mode: str = "auto") -> str:
     evs = upcoming_rows[:6]
     if not evs: return ""
     n = len(evs)
-    xs = [100 + i * int(1000 / max(1, n - 1)) for i in range(n)] if n > 1 else [600]
+    xs = [105 + i * int(990 / max(1, n - 1)) for i in range(n)] if n > 1 else [600]
     nodes_svg = []
     for i, ev in enumerate(evs):
         cx, d_left = xs[i], ev["_days"]
@@ -99,27 +121,26 @@ def build_event_timeline_svg_html(upcoming_rows: list[dict]) -> str:
         bg_box = "#2d1216" if d_left <= 3 else ("#2e2409" if d_left <= 7 else "#122136")
         d_badge = "今日登場" if d_left == 0 else f"倒數 {d_left} 天"
         short_lbl, date_mmdd = xml_esc(ev["_short"][:11]), xml_esc(ev["日期"][5:])
-        box_y, line_y1, line_y2 = (16, 76, 102) if i % 2 == 0 else (132, 114, 132)
+        box_y, line_y1, line_y2 = (14, 78, 104) if i % 2 == 0 else (136, 118, 136)
         nodes_svg.append(
             f'<line x1="{cx}" y1="{line_y1}" x2="{cx}" y2="{line_y2}" stroke="{col}" stroke-width="2" stroke-dasharray="3,2"/>'
-            f'<circle cx="{cx}" cy="108" r="9" fill="{col}" stroke="#0f172a" stroke-width="3"/>'
-            f'<rect x="{cx - 86}" y="{box_y}" width="172" height="60" rx="8" fill="{bg_box}" stroke="{col}" stroke-width="1.8"/>'
-            f'<text x="{cx}" y="{box_y + 20}" fill="{col}" font-family="sans-serif" font-size="12.5" font-weight="900" text-anchor="middle">{date_mmdd} ｜ {d_badge}</text>'
-            f'<text x="{cx}" y="{box_y + 44}" fill="#f8fafc" font-family="sans-serif" font-size="13.5" font-weight="800" text-anchor="middle">{short_lbl}</text>'
+            f'<circle cx="{cx}" cy="111" r="9" fill="{col}" stroke="#0f172a" stroke-width="3"/>'
+            f'<rect x="{cx - 90}" y="{box_y}" width="180" height="64" rx="8" fill="{bg_box}" stroke="{col}" stroke-width="1.8"/>'
+            f'<text x="{cx}" y="{box_y + 22}" fill="{col}" font-family="sans-serif" font-size="13.5" font-weight="900" text-anchor="middle">{date_mmdd} ｜ {d_badge}</text>'
+            f'<text x="{cx}" y="{box_y + 47}" fill="#f8fafc" font-family="sans-serif" font-size="14.5" font-weight="800" text-anchor="middle">{short_lbl}</text>'
         )
-    svg_xml = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 208" width="100%" height="auto">
-<rect width="1200" height="208" rx="10" fill="#0b1220" stroke="#334155" stroke-width="1.5"/>
-<line x1="60" y1="108" x2="1140" y2="108" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
-<polygon points="1140,101 1158,108 1140,115" fill="#64748b"/>
+    svg_xml = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 214" width="100%" height="auto">
+<rect width="1200" height="214" rx="10" fill="#0b1220" stroke="#334155" stroke-width="1.5"/>
+<line x1="55" y1="111" x2="1145" y2="111" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+<polygon points="1145,104 1163,111 1145,118" fill="#64748b"/>
 {''.join(nodes_svg)}
 </svg>"""
-    b64_svg = base64.b64encode(svg_xml.encode("utf-8")).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64_svg}" style="width:100%; height:auto; display:block; border-radius:10px; margin:6px 0 10px 0;" />'
+    return _wrap_svg_zoom(svg_xml, zoom_mode)
 
 # ==========================================
-# 3. v63.0 全新升級：左側 40 日真實歷史 ＋ 右側全浮動三情境扇形預測 SVG 圖（紅點永不倒退！）
+# 3. v63.1 校準版：左側 40 日真實歷史 ＋ 右側三情境扇形預測 SVG 圖（右端零截斷 ＋ 事件三層防重疊 ＋ 可下載放大）
 # ==========================================
-def build_realtime_and_forecast_svg_html(fleet: dict, radar: dict, forecast: dict) -> str:
+def build_realtime_forecast_svg_raw(fleet: dict, radar: dict, forecast: dict) -> str:
     hist_c = fleet.get("hist_closes", [])
     hist_d = fleet.get("hist_dates", [])
     tw_now = float(fleet["twii_now"])
@@ -127,34 +148,29 @@ def build_realtime_and_forecast_svg_html(fleet: dict, radar: dict, forecast: dic
         hist_c = [tw_now * 1.12, tw_now * 1.05, tw_now * 0.96, tw_now * 0.98, tw_now]
         hist_d = ["D-20", "D-15", "D-10", "D-5", "今日"]
 
-    pb = forecast["paths"]["base"]
-    pu = forecast["paths"]["bull"]
-    pd_p = forecast["paths"]["bear"]
+    pb, pu, pd_p = forecast["paths"]["base"], forecast["paths"]["bull"], forecast["paths"]["bear"]
     probs = forecast["probs"]
 
-    # 自動計算包含歷史、預測三路徑與關鍵均線之 Y 軸動態邊界
     all_vals = list(hist_c) + pb + pu + pd_p + [fleet["ma20"], fleet["ma240"], fleet["m_ma20"]]
     y_max_raw, y_min_raw = max(all_vals), min(all_vals)
-    pad = max(600.0, (y_max_raw - y_min_raw) * 0.12)
+    pad = max(650.0, (y_max_raw - y_min_raw) * 0.14)
     y_hi, y_lo = y_max_raw + pad, max(1000.0, y_min_raw - pad)
 
-    # 畫布座標配置：左半部歷史 (x: 68 ~ 620)，右半部預測 (x: 620 ~ 1125)，Y 範圍 (66 ~ 358)
-    x_left, x_today, x_right = 68, 620, 1125
-    y_top, y_bot = 66, 358
+    # 修正右端截斷：預測終點收在 x=985，右邊保留 215px 完整容納點位標籤！
+    x_left, x_today, x_right = 68, 560, 995
+    y_top, y_bot = 68, 370
 
     def to_y(val: float) -> int:
         ratio = (val - y_lo) / max(1.0, (y_hi - y_lo))
         return int(round(y_bot - ratio * (y_bot - y_top)))
 
-    # 水平網格線與 Y 軸刻度
     grid_svg = []
     for k in range(5):
         gv = y_lo + (y_hi - y_lo) * (k / 4.0)
         gy = to_y(gv)
         grid_svg.append(f'<line x1="{x_left}" y1="{gy}" x2="{x_right}" y2="{gy}" stroke="#1e293b" stroke-width="1" stroke-dasharray="4,4"/>')
-        grid_svg.append(f'<text x="{x_left - 8}" y="{gy + 4}" fill="#94a3b8" font-family="sans-serif" font-size="11" text-anchor="end">{gv:,.0f}</text>')
+        grid_svg.append(f'<text x="{x_left - 8}" y="{gy + 4}" fill="#94a3b8" font-family="sans-serif" font-size="12" text-anchor="end">{gv:,.0f}</text>')
 
-    # 關鍵動態均線水平參考線 (月線 20MA、年線 240MA、月20MA鐵板)
     ref_svg = []
     for lbl, rval, rcol in [
         (f"月線20MA {fleet['ma20']:,.0f}", fleet["ma20"], "#f59e0b"),
@@ -163,114 +179,133 @@ def build_realtime_and_forecast_svg_html(fleet: dict, radar: dict, forecast: dic
     ]:
         if y_lo <= rval <= y_hi:
             ry = to_y(rval)
-            ref_svg.append(f'<line x1="{x_left}" y1="{ry}" x2="{x_right}" y2="{ry}" stroke="{rcol}" stroke-width="1.3" stroke-opacity="0.7" stroke-dasharray="6,4"/>')
-            ref_svg.append(f'<text x="{x_left + 6}" y="{ry - 4}" fill="{rcol}" font-family="sans-serif" font-size="11.5" font-weight="bold">{xml_esc(lbl)}</text>')
+            ref_svg.append(f'<line x1="{x_left}" y1="{ry}" x2="{x_right}" y2="{ry}" stroke="{rcol}" stroke-width="1.3" stroke-opacity="0.72" stroke-dasharray="6,4"/>')
+            ref_svg.append(f'<text x="{x_left + 6}" y="{ry - 5}" fill="{rcol}" font-family="sans-serif" font-size="12" font-weight="bold">{xml_esc(lbl)}</text>')
 
-    # 左半部：真實 40 日歷史折線 (時間單向往右)
     n_h = len(hist_c)
-    hist_pts = []
-    for idx_h, val_h in enumerate(hist_c):
-        xh = int(round(x_left + (x_today - x_left) * (idx_h / max(1, n_h - 1))))
-        hist_pts.append(f"{xh},{to_y(val_h)}")
+    hist_pts = [f"{int(round(x_left + (x_today - x_left) * (idx_h / max(1, n_h - 1))))},{to_y(val_h)}" for idx_h, val_h in enumerate(hist_c)]
     hist_poly = " ".join(hist_pts)
 
-    # 標示歷史最高點與最低點
     hi_i, lo_i = int(np.argmax(hist_c)), int(np.argmin(hist_c))
     hi_x = int(round(x_left + (x_today - x_left) * (hi_i / max(1, n_h - 1))))
     lo_x = int(round(x_left + (x_today - x_left) * (lo_i / max(1, n_h - 1))))
     hi_y, lo_y = to_y(hist_c[hi_i]), to_y(hist_c[lo_i])
 
-    # 左側日期刻度
     x_ticks_svg = []
     for ti in sorted(set([0, n_h // 3, (2 * n_h) // 3, n_h - 1])):
         tx = int(round(x_left + (x_today - x_left) * (ti / max(1, n_h - 1))))
         dl = "今日" if ti == n_h - 1 else xml_esc(hist_d[ti])
         tcol = "#ffd54f" if ti == n_h - 1 else "#94a3b8"
-        x_ticks_svg.append(f'<text x="{tx}" y="{y_bot + 20}" fill="{tcol}" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">{dl}</text>')
+        x_ticks_svg.append(f'<text x="{tx}" y="{y_bot + 22}" fill="{tcol}" font-family="sans-serif" font-size="12.5" font-weight="bold" text-anchor="middle">{dl}</text>')
 
-    # 右半部：未來 1~4 週三情境扇形預測路徑 (x = [今日, +1週, +2~3週, +4週])
-    fx_xs = [x_today, 755, 925, 1085]
-    for fx_x, fx_l in zip(fx_xs[1:], ["+1週", "+2~3週", "+4週(1個月)"]):
-        x_ticks_svg.append(f'<text x="{fx_x}" y="{y_bot + 20}" fill="#93c5fd" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">{fx_l}</text>')
+    fx_xs = [x_today, 700, 845, 985]
+    for fx_x, fx_l in zip(fx_xs[1:], ["+1週", "+2~3週", "+4週"]):
+        x_ticks_svg.append(f'<text x="{fx_x}" y="{y_bot + 22}" fill="#93c5fd" font-family="sans-serif" font-size="12.5" font-weight="bold" text-anchor="middle">{fx_l}</text>')
 
     def _pts_str(arr):
         return " ".join(f"{fx_xs[i]},{to_y(arr[i])}" for i in range(min(len(fx_xs), len(arr))))
 
     poly_bull, poly_base, poly_bear = _pts_str(pu), _pts_str(pb), _pts_str(pd_p)
-    # 扇形信心區間半透明填充 (樂觀上緣 + 保守下緣反向)
     fan_pts = _pts_str(pu) + " " + " ".join(f"{fx_xs[i]},{to_y(pd_p[i])}" for i in range(len(fx_xs) - 1, -1, -1))
 
-    # 右側未來 30 天重大風險事件垂直標記
+    # 上方重大事件標籤：改為 3 層垂直錯開，徹底根除碰撞重疊
     ev_marks_svg = []
     for idx_e, em in enumerate(forecast.get("events_on_axis", [])):
-        ex = int(round(x_today + (fx_xs[-1] - x_today) * min(1.0, em["days"] / 28.0)))
-        ey_lbl = y_top + 14 + (idx_e % 2) * 16
+        ex = int(round(x_today + (fx_xs[-1] - x_today) * min(0.95, max(0.06, em["days"] / 28.0))))
+        ey_lbl = y_top + 18 + (idx_e % 3) * 20
+        ex_lbl = max(x_today + 65, min(x_right - 55, ex))
         ev_marks_svg.append(
-            f'<line x1="{ex}" y1="{y_top}" x2="{ex}" y2="{y_bot}" stroke="#f87171" stroke-width="1.2" stroke-opacity="0.55" stroke-dasharray="3,3"/>'
-            f'<text x="{ex}" y="{ey_lbl}" fill="#fca5a5" font-family="sans-serif" font-size="10.8" font-weight="bold" text-anchor="middle">⚡{xml_esc(em["label"])}</text>'
+            f'<line x1="{ex}" y1="{y_top}" x2="{ex}" y2="{y_bot}" stroke="#f87171" stroke-width="1.3" stroke-opacity="0.55" stroke-dasharray="3,3"/>'
+            f'<text x="{ex_lbl}" y="{ey_lbl}" fill="#fca5a5" font-family="sans-serif" font-size="12" font-weight="bold" text-anchor="middle">⚡{xml_esc(em["label"])}</text>'
         )
 
-    # 今日紅點座標 (永遠鎖在 x_today，永不倒退)
     y_now = to_y(tw_now)
     dot_col = "#ff4d4f" if radar["master_state"] == "RED_LOCKED" else ("#fbbf24" if radar["master_state"] == "YELLOW" else "#00e676")
-    y_badge = max(y_top + 18, min(y_bot - 22, y_now - 26))
+    y_badge = max(y_top + 20, min(y_bot - 22, y_now - 28))
 
-    # 右端三路徑終點防重疊微調
-    y_end_u, y_end_b, y_end_d = to_y(pu[-1]), to_y(pb[-1]), to_y(pd_p[-1])
-    if abs(y_end_b - y_end_u) < 22: y_end_b = y_end_u + 22
-    if abs(y_end_d - y_end_b) < 22: y_end_d = y_end_b + 22
+    # 右側三終點標籤強制防重疊並完整落於 1200 畫布內
+    end_items = sorted([
+        ("bull", to_y(pu[-1]), "#69f0ae", f"🟢樂觀({probs['bull']}%) {pu[-1]:,.0f}"),
+        ("base", to_y(pb[-1]), "#fcd34d", f"🟡基準({probs['base']}%) {pb[-1]:,.0f}"),
+        ("bear", to_y(pd_p[-1]), "#ff8a80", f"🔴保守({probs['bear']}%) {pd_p[-1]:,.0f}")
+    ], key=lambda t: t[1])
+    end_labels_svg = []
+    prev_ly = y_top - 10
+    for _, raw_y, col_t, txt_t in end_items:
+        ly = max(raw_y, prev_ly + 26)
+        ly = min(y_bot - 6, ly)
+        prev_ly = ly
+        end_labels_svg.append(f'<text x="{fx_xs[-1] + 14}" y="{ly + 4}" fill="{col_t}" font-family="sans-serif" font-size="13.5" font-weight="900">{xml_esc(txt_t)}</text>')
 
-    svg_xml = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 412" width="100%" height="auto">
-<rect width="1200" height="412" rx="12" fill="#09111a" stroke="#334155" stroke-width="2"/>
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 422" width="100%" height="auto">
+<rect width="1200" height="422" rx="12" fill="#09111a" stroke="#334155" stroke-width="2"/>
 <rect x="{x_left}" y="{y_top}" width="{x_today - x_left}" height="{y_bot - y_top}" fill="#0f172a"/>
 <rect x="{x_today}" y="{y_top}" width="{x_right - x_today}" height="{y_bot - y_top}" fill="#131c31"/>
-<text x="{(x_left + x_today)//2}" y="44" fill="#38bdf8" font-family="sans-serif" font-size="14" font-weight="900" text-anchor="middle">◀ 過去 {n_h} 個交易日真實歷史走勢（實線）</text>
-<text x="{(x_today + x_right)//2}" y="44" fill="#fcd34d" font-family="sans-serif" font-size="14" font-weight="900" text-anchor="middle">未來 1～4 週全浮動三情境預測扇形（虛線） ▶</text>
+<text x="{(x_left + x_today)//2}" y="44" fill="#38bdf8" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">◀ 過去 {n_h} 日真實歷史走勢（實線）</text>
+<text x="{(x_today + x_right)//2}" y="44" fill="#fcd34d" font-family="sans-serif" font-size="15" font-weight="900" text-anchor="middle">未來 1～4 週全浮動三情境預測（虛線） ▶</text>
 {''.join(grid_svg)}
 {''.join(ref_svg)}
 {''.join(ev_marks_svg)}
 <polygon points="{fan_pts}" fill="#f59e0b" fill-opacity="0.10"/>
-<line x1="{x_today}" y1="52" x2="{x_today}" y2="{y_bot + 6}" stroke="#ffd54f" stroke-width="2" stroke-dasharray="5,4"/>
-<polyline points="{hist_poly}" fill="none" stroke="#38bdf8" stroke-width="3.5" stroke-linejoin="round"/>
-<circle cx="{hi_x}" cy="{hi_y}" r="5" fill="#f97316" stroke="#fff" stroke-width="1.5"/>
-<text x="{hi_x}" y="{max(y_top + 14, hi_y - 9)}" fill="#fdba74" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">高 {hist_c[hi_i]:,.0f}</text>
-<circle cx="{lo_x}" cy="{lo_y}" r="5" fill="#ef4444" stroke="#fff" stroke-width="1.5"/>
-<text x="{lo_x}" y="{min(y_bot - 6, lo_y + 16)}" fill="#fca5a5" font-family="sans-serif" font-size="11.5" font-weight="bold" text-anchor="middle">低 {hist_c[lo_i]:,.0f}</text>
-<polyline points="{poly_bull}" fill="none" stroke="#00e676" stroke-width="3" stroke-dasharray="7,5" stroke-linejoin="round"/>
-<polyline points="{poly_base}" fill="none" stroke="#fbbf24" stroke-width="4" stroke-dasharray="9,5" stroke-linejoin="round"/>
-<polyline points="{poly_bear}" fill="none" stroke="#ff4d4f" stroke-width="3" stroke-dasharray="7,5" stroke-linejoin="round"/>
+<line x1="{x_today}" y1="54" x2="{x_today}" y2="{y_bot + 6}" stroke="#ffd54f" stroke-width="2.2" stroke-dasharray="5,4"/>
+<polyline points="{hist_poly}" fill="none" stroke="#38bdf8" stroke-width="3.6" stroke-linejoin="round"/>
+<circle cx="{hi_x}" cy="{hi_y}" r="5.5" fill="#f97316" stroke="#fff" stroke-width="1.5"/>
+<text x="{hi_x}" y="{max(y_top + 16, hi_y - 10)}" fill="#fdba74" font-family="sans-serif" font-size="12.5" font-weight="bold" text-anchor="middle">高 {hist_c[hi_i]:,.0f}</text>
+<circle cx="{lo_x}" cy="{lo_y}" r="5.5" fill="#ef4444" stroke="#fff" stroke-width="1.5"/>
+<text x="{lo_x}" y="{min(y_bot - 6, lo_y + 18)}" fill="#fca5a5" font-family="sans-serif" font-size="12.5" font-weight="bold" text-anchor="middle">低 {hist_c[lo_i]:,.0f}</text>
+<polyline points="{poly_bull}" fill="none" stroke="#00e676" stroke-width="3.2" stroke-dasharray="7,5" stroke-linejoin="round"/>
+<polyline points="{poly_base}" fill="none" stroke="#fbbf24" stroke-width="4.2" stroke-dasharray="9,5" stroke-linejoin="round"/>
+<polyline points="{poly_bear}" fill="none" stroke="#ff4d4f" stroke-width="3.2" stroke-dasharray="7,5" stroke-linejoin="round"/>
 <circle cx="{fx_xs[-1]}" cy="{to_y(pu[-1])}" r="5.5" fill="#00e676"/>
 <circle cx="{fx_xs[-1]}" cy="{to_y(pb[-1])}" r="6" fill="#fbbf24"/>
 <circle cx="{fx_xs[-1]}" cy="{to_y(pd_p[-1])}" r="5.5" fill="#ff4d4f"/>
-<text x="{fx_xs[-1] + 10}" y="{y_end_u + 4}" fill="#69f0ae" font-family="sans-serif" font-size="12" font-weight="900">🟢樂觀({probs['bull']}%) {pu[-1]:,.0f}</text>
-<text x="{fx_xs[-1] + 10}" y="{y_end_b + 4}" fill="#fcd34d" font-family="sans-serif" font-size="12.5" font-weight="900">🟡基準({probs['base']}%) {pb[-1]:,.0f}</text>
-<text x="{fx_xs[-1] + 10}" y="{y_end_d + 4}" fill="#ff8a80" font-family="sans-serif" font-size="12" font-weight="900">🔴保守({probs['bear']}%) {pd_p[-1]:,.0f}</text>
+{''.join(end_labels_svg)}
 <circle cx="{x_today}" cy="{y_now}" r="14" fill="{dot_col}" fill-opacity="0.32"/>
 <circle cx="{x_today}" cy="{y_now}" r="7" fill="{dot_col}" stroke="#ffffff" stroke-width="2.5"/>
-<rect x="{x_today - 78}" y="{y_badge - 14}" width="156" height="26" rx="6" fill="{dot_col}" stroke="#09111a" stroke-width="2"/>
-<text x="{x_today}" y="{y_badge + 4}" fill="#ffffff" font-family="sans-serif" font-size="13" font-weight="900" text-anchor="middle">📍今日 {tw_now:,.0f}點</text>
+<rect x="{x_today - 82}" y="{y_badge - 15}" width="164" height="28" rx="6" fill="{dot_col}" stroke="#09111a" stroke-width="2"/>
+<text x="{x_today}" y="{y_badge + 4}" fill="#ffffff" font-family="sans-serif" font-size="14" font-weight="900" text-anchor="middle">📍今日 {tw_now:,.0f}點</text>
 {''.join(x_ticks_svg)}
 </svg>"""
-    b64_svg = base64.b64encode(svg_xml.encode("utf-8")).decode("utf-8")
+
+def build_realtime_and_forecast_svg_html(fleet: dict, radar: dict, forecast: dict, zoom_mode: str = "auto") -> str:
+    hist_c = fleet.get("hist_closes", []) or [fleet["twii_now"]]
+    tw_now = float(fleet["twii_now"])
+    probs = forecast["probs"]
+    svg_xml = build_realtime_forecast_svg_raw(fleet, radar, forecast)
     border_col = "#ff4d4f" if radar["master_state"] == "RED_LOCKED" else ("#fbbf24" if radar["master_state"] == "YELLOW" else "#00e676")
     policy_warn = "<br>• <span style='color:#ff8a80;'>⚠️ <b>政策逃命波警示</b>：限空令/護盤後 10 交易日內，落底未達 4/5 且未連 3 日站穩 10MA，急彈一律定性為「政策逃命波」！</span>" if radar["is_policy_escape_wave"] else ""
     precursor_b = f"<br>• <span style='color:#fde047;'>{radar['precursor_txt']}</span>" if radar.get("precursor_txt") else ""
 
     return clean_html(f"""
-<div style="background: linear-gradient(180deg, #0d1520 0%, #16222f 100%); border: 2px solid {border_col}; border-radius: 14px; padding: 16px 20px; margin-bottom: 12px; color: #fff;">
-<div style="text-align:center; font-size:20.5px; font-weight:900; color:#fcd34d; border-bottom:1px solid rgba(252,211,77,0.3); padding-bottom:7px; margin-bottom:10px;">
+<div style="background: linear-gradient(180deg, #0d1520 0%, #16222f 100%); border: 2px solid {border_col}; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; color: #fff;">
+<div class="war-sub-title" style="text-align:center; font-size:19.5px; font-weight:900; color:#fcd34d; border-bottom:1px solid rgba(252,211,77,0.3); padding-bottom:7px; margin-bottom:10px;">
 📈 加權指數真實歷史軌跡 × 未來 1～4 週全浮動三情境預測走勢圖（{forecast['mode_label']}）
 </div>
-<div style="font-size:14.8px; font-weight:800; color:#f8fafc; background:rgba(0,0,0,0.35); padding:9px 14px; border-radius:8px; margin-bottom:10px; border-left:4px solid {border_col}; line-height:1.65;">
-• <b>📍 時間單向推進基準</b>：左半部為過去 {n_h} 日真實收盤（高 <b>{max(hist_c):,.0f}</b> ／ 低 <b>{min(hist_c):,.0f}</b>）；紅點鎖定今日 <b>{tw_now:,.0f} 點</b>，右半部依 ATR({fleet['atr_14_pts']:,.0f}點)、均線、外資 ΔOI 與事件時鐘動態重算三情境機率（🟡基準 {probs['base']}% ／ 🟢樂觀 {probs['bull']}% ／ 🔴保守 {probs['bear']}%）<br>
+<div style="font-size:14.4px; font-weight:800; color:#f8fafc; background:rgba(0,0,0,0.35); padding:9px 13px; border-radius:8px; margin-bottom:10px; border-left:4px solid {border_col}; line-height:1.65;">
+• <b>📍 時間單向推進基準</b>：左側為過去 {len(hist_c)} 日真實收盤（高 <b>{max(hist_c):,.0f}</b> ／ 低 <b>{min(hist_c):,.0f}</b>）；紅點固定於今日 <b>{tw_now:,.0f} 點</b>，右側依 ATR({fleet['atr_14_pts']:,.0f}點)、均線、外資 ΔOI 與事件自動推演（🟡基準 {probs['base']}% ／ 🟢樂觀 {probs['bull']}% ／ 🔴保守 {probs['bear']}%）<br>
 • <b>總開關狀態</b>：{radar['master_badge']} ➔ <span style="color:#ffd54f;">{radar['master_action']}</span>{policy_warn}{precursor_b}
 </div>
-<img src="data:image/svg+xml;base64,{b64_svg}" style="width:100%; height:auto; display:block; border-radius:10px;" />
+{_wrap_svg_zoom(svg_xml, zoom_mode)}
 </div>
 """)
 
+def build_forecast_mobile_cards_html(forecast: dict) -> str:
+    """手機友善直式三情境作戰卡片（免橫向拉表格即可一眼看清完整劇本）"""
+    cards = []
+    for r in forecast.get("table_rows", []):
+        title = r["預測情境（圖中線色）"]
+        b_col = "#fbbf24" if "基準" in title else ("#00e676" if "樂觀" in title else "#ff4d4f")
+        cards.append(
+            f"<div style='background:#0f172a; border-left:5px solid {b_col}; border-radius:10px; padding:12px 14px; margin-bottom:10px; color:#f8fafc; font-size:14.2px; line-height:1.65;'>"
+            f"<div style='font-size:15.5px; font-weight:900; color:{b_col}; margin-bottom:4px;'>{title} ｜ 機率 {r['動態機率']}</div>"
+            f"• <b>預測路徑</b>：{r['未來 1～4 週預測路徑與目標區']}<br>"
+            f"• <b>確認分界</b>：{r['確認／轉折分界']}<br>"
+            f"• <b>實戰操作</b>：<span style='color:#fde047;'>{r['四水庫實戰操作']}</span></div>"
+        )
+    return clean_html("".join(cards))
+
 # ==========================================
-# 4. 盤面族群格式化 ＋ 完整還原 8 大【先結論、後數據、附數字含意】指標面板
+# 4. 盤面族群格式化 ＋ 8 大【先結論、後數據、附數字含意】指標面板 (已修正微調 3：60分K高檔鈍化判讀)
 # ==========================================
 def compute_tw_hot_sectors(records: list[dict]) -> dict:
     if not records:
@@ -308,12 +343,11 @@ def build_8_indicator_panels_html(
     sb_limit_up: int, sb_limit_dn: int, vix_now: float, vix_chg: float, tnx_val: float, tnx_chg: float,
     sox_chg: float, tsm_chg: float, tsm_ext: str, nvda_chg: float, nvda_ext: str, fx_now: float, fx_stopped_dep: bool
 ) -> str:
-    """完整還原 8 大評估面板，每張卡嚴格採『① 先講結論 ➔ ② 數據明細 ➔ ③ 📖 數字含意與判讀基準』"""
     sox_c = "#ff4d4f" if sox_chg >= 0 else "#00e676"
     tsm_c = "#ff4d4f" if tsm_chg >= 0 else "#00e676"
     nvda_c = "#ff4d4f" if nvda_chg >= 0 else "#00e676"
 
-    # --- 1. 台股廣度與熱門族群 ---
+    # 1. 台股廣度與熱門族群
     adv_r = breadth["adv_ratio_pct"]
     c1_concl = "🚀 全面普漲／廣度推力爆發" if (adv_r >= 85 or sb_limit_up >= 100) else ("🟢 多方家數佔優" if adv_r >= 55 else ("🚨 空方恐慌普跌" if adv_r <= 25 else "⚖️ 盤面分化震盪"))
     if scan_data:
@@ -326,7 +360,7 @@ def build_8_indicator_panels_html(
         )
     c1_meaning = "📖 數字含意：上漲比 ≧85% 或漲停 ≧100家 觸發『2025/04 廣度推力豁免』（無量鎖漲停亦判反轉）；跌停由破百縮至 &lt;20家 代表恐慌殺盤結束。"
 
-    # --- 2. 美股 VIX / 費半 / ADR ---
+    # 2. 美股 VIX / 費半 / ADR
     c2_concl = "🚨 恐慌爆表（VIX ≧ 30）" if vix_now >= 30 else ("🔥 半導體強彈修復" if sox_chg >= 2.0 else ("⚠️ 避險情緒偏高（VIX 20~29）" if vix_now >= 20 else "☀️ 美股風險偏好穩健"))
     c2_body = (
         f"• <b>美股氛圍</b>：{us_data['session_tag']} ｜ VIX <b>{vix_now:.2f}</b>({vix_chg:+.1f}%)<br>"
@@ -335,7 +369,7 @@ def build_8_indicator_panels_html(
     )
     c2_meaning = "📖 數字含意：VIX ≧30 屬股災恐慌區、20~29 屬高波動警戒、&lt;20 屬常態多頭安全區；費半與台積ADR直接定調次日台股開盤跳空方向。"
 
-    # --- 3. 找回：台股散戶綜合恐慌指數 (0~100分) ---
+    # 3. 台股散戶綜合恐慌指數
     s_maint = float(np.clip((170.0 - sb_maint) / 35.0 * 100.0, 0, 100))
     s_pcr = float(np.clip((120.0 - deriv["pc_ratio"]) / 90.0 * 100.0, 0, 100))
     s_vix = float(np.clip((vix_now - 13.0) / 25.0 * 100.0, 0, 100))
@@ -351,7 +385,7 @@ def build_8_indicator_panels_html(
     )
     c3_meaning = "📖 數字含意：&gt;60分 屬散戶認輸斷頭區（反指標易出波段強彈）；35~55分 為平衡選股區；&lt;28分 代表散戶瘋狂追價須防隨時修正。"
 
-    # --- 4. 融資維持率與大盤融資曲線 ---
+    # 4. 融資維持率與大盤融資曲線
     c4_concl = "💎 進入真斷頭甜美清洗區（維持率 ≦150% 或 融資減幅追上大盤）" if (sb_maint <= 150 or sb_margin_dd >= fleet["twii_30d_dd_pct"]) else ("🟡 融資去槓桿進行中" if sb_margin_2d < 0 else "⚠️ 融資餘額偏高、籌碼仍待沉澱")
     c4_body = (
         f"• <b>動態融資維持率</b>：<b style='color:#ffd54f; font-size:16px;'>{sb_maint:.1f}%</b>（{deriv['margin_src']}）<br>"
@@ -359,7 +393,7 @@ def build_8_indicator_panels_html(
     )
     c4_meaning = "📖 數字含意：整戶維持率跌破 150%（純上市個股破 135%~145%）會強制引發券商追繳斷頭；當『30日融資減幅% ≧ 大盤跌幅%』代表散戶槓桿徹底洗淨。"
 
-    # --- 5. 找回：大小台期貨動向（雙口徑 ΔOI ＋ 小台散戶）＆外資佈空成本 ---
+    # 5. 大小台期貨動向＆外資佈空成本
     if sb_fini_oi < -80000: c5_concl = f"🚨 外資極限重空 ({sb_fini_oi:+,}口・空單大於8萬口壓制)"
     elif sb_fini_oi < -60000: c5_concl = f"🔴 外資股災避險空單 ({sb_fini_oi:+,}口)"
     elif sb_fini_oi < -40000: c5_concl = f"🟡 外資警戒避險偏空 ({sb_fini_oi:+,}口)"
@@ -372,33 +406,42 @@ def build_8_indicator_panels_html(
     )
     c5_meaning = "📖 數字含意：外資大台淨空單 &gt;4萬警戒、&gt;6萬股災、&gt;8萬極限對沖；『ΔOI含夜盤』與『日盤交易』常因夜盤回補而不同；小台散戶淨口數為負代表散戶看空反指標偏多。"
 
-    # --- 6. 找回：選擇權 PCR ＋ 自營商權證避險 ---
+    # 6. 選擇權 PCR ＋ 自營商權證避險
     pcr_v, wh_v = deriv["pc_ratio"], deriv["warrant_hedge_yi"]
     c6_concl = "🟢 選擇權下檔撐盤強 (PCR > 120%)" if pcr_v >= 120 else ("🔴 上檔買權反壓沉重 (PCR < 80%)" if pcr_v < 80 else "⚖️ 選擇權多空拉鋸 (PCR 80%~120%)")
     c6_body = (
         f"• <b>全月份選擇權 P/C Ratio</b>：<b style='color:#ffd54f; font-size:16px;'>{pcr_v:.1f}%</b><br>"
         f"• <b>自營商權證 Delta 避險</b>：<b style='color:{'#ff8a80' if wh_v >= 0 else '#69f0ae'};'>{wh_v:+.2f} 億元</b>（日期 {deriv.get('twse_date') or '最新'}）"
     )
-    c6_meaning = "📖 數字含意：PCR = 賣權OI ÷ 買權OI，&lt;80%代表莊家大賣買權壓天花板（偏空）、&gt;120%代表下檔鐵板支撐強；權證避險大賣逾 -35億 代表市場認購權證停損宣洩。"
+    c6_meaning = "📖 數字含意：PCR = 賣權OI ÷ 買權OI，&lt;80%代表莊家大賣買權壓天花板（偏空）、&gt;120%代表下檔鐵板支撐強；權證避險大賣逾 -35億 代表避險/停損宣洩。"
 
-    # --- 7. 找回：60分K微觀扳機 ＆ 日KDJ動能空間 ---
-    k60_bull = (fleet["twii_now"] >= fleet["k60_ma5"]) and (fleet["twii_now"] >= fleet["ma5"])
-    c7_concl = "🟢 60分K與日5MA同步站穩（短線右側止跌訊號亮起）" if k60_bull else ("🟡 60分K反彈測試中（尚未站回日5MA）" if fleet["twii_now"] >= fleet["k60_ma5"] else "🔴 60分K弱勢蓋壓（短線仍受均線壓制）")
+    # 7. 60分K微觀扳機 ＆ 日KDJ動能空間（修正微調 3：加入 0.3% 容錯與高檔鈍化判讀）
+    near_60_ma5 = (fleet["twii_now"] >= fleet["k60_ma5"] * 0.997)
+    above_day_ma5 = (fleet["twii_now"] >= fleet["ma5"])
+    above_60_ma20 = (fleet["twii_now"] >= fleet["k60_ma20"])
+    if near_60_ma5 and above_day_ma5:
+        c7_concl = "🔥 60分K高檔鈍化震盪（穩守日5MA，防短線過熱回測）" if fleet["k60_j"] >= 95.0 else "🟢 60分K與日5MA同步站穩（短線右側止跌訊號亮起）"
+    elif above_day_ma5 and above_60_ma20:
+        c7_concl = "🟢 穩守日5MA與60分20MA（高檔換手整理中）"
+    elif near_60_ma5 or above_60_ma20:
+        c7_concl = "🟡 60分K反彈測試中（尚未站回日5MA）"
+    else:
+        c7_concl = "🔴 60分K弱勢蓋壓（短線仍受均線壓制）"
     c7_body = (
         f"• <b>60分K微觀結構</b>：現價 <b>{fleet['twii_now']:,.0f}</b> vs 60分5MA <b>{fleet['k60_ma5']:,.0f}</b> ／ 60分20MA <b>{fleet['k60_ma20']:,.0f}</b> ｜ 60分J值 <b>{fleet['k60_j']:.1f}</b> ({'↗勾頭' if fleet['k60_j'] >= fleet['k60_j_prev'] else '↘下彎'})<br>"
         f"• <b>日線 KDJ 與乖離</b>：日K <b>{fleet['k9']:.1f}</b> ／ 日D <b>{fleet['d9']:.1f}</b> ／ 日J <b>{fleet['j9']:.1f}</b> ｜ 乖離率：5MA(<b>{fleet['bias_5']:+.1f}%</b>) / 10MA(<b>{fleet['bias_10']:+.1f}%</b>) / 20MA(<b>{fleet['bias_20']:+.1f}%</b>)"
     )
-    c7_meaning = "📖 數字含意：止跌必須先站上『60分5MA』再收復『日5MA』；日J &lt;10 代表短線極度超賣醞釀反彈，日J &gt;95 或 BIAS10 &gt;+10% 屬短線過熱禁追。"
+    c7_meaning = "📖 數字含意：止跌須先站上『60分5MA』再收復『日5MA』；60分J &gt;95 代表短線急漲高檔鈍化防隔日回測，日J &lt;10 屬極度超賣醞釀反彈。"
 
-    # --- 8. 找回：宏觀美債 10Y (^TNX) ＆ 新台幣匯率利差雷達 ---
+    # 8. 宏觀美債 10Y (^TNX) ＆ 新台幣匯率利差雷達
     if tnx_val >= 5.0 and fx_now >= 32.5: c8_concl = "🚨 雙紅燈外資提款警戒（美債 ≧5% ＋ 台幣 ≧32.5）"
     elif fx_stopped_dep and tnx_val < 5.0: c8_concl = "🟢 債匯壓力緩解（美債 <5% 且台幣止貶，助外資回補）"
-    else: c8_concl = "🟡 債匯高檔警戒（美債偏高或台幣偏弱，嚴控估值）"
+    else: c8_concl = "🟡 債匯高檔警戒（美債偏高或台幣續貶，嚴控估值）"
     c8_body = (
         f"• <b>美國 10 年期公債殖利率 (^TNX)</b>：<b style='color:{'#ff8a80' if tnx_val >= 5.0 else '#69f0ae'}; font-size:16px;'>{tnx_val:.2f}%</b> ({tnx_chg:+.2f}%)<br>"
         f"• <b>美元兌新台幣 (USD/TWD)</b>：現匯 <b>{fx_now:.3f}</b>（日變動 {deriv['fx_chg_ntd']:+.3f} ｜ 5MA={deriv['fx_ma5']:.3f} ／ 20MA={deriv['fx_ma20']:.3f} ｜ <b>{'已止貶✅' if fx_stopped_dep else '續貶⚠️'}</b>）"
     )
-    c8_meaning = "📖 數字含意：^TNX 突破 5.0% 會直接壓縮科技股本益比；台幣貶破 32.5 且跌破 5MA 代表外資匯出提款，此時系統自動加權置頂『新穀倉1』與『政策內需防彈衣』。"
+    c8_meaning = "📖 數字含意：^TNX 突破 5.0% 會直接壓縮科技股本益比；台幣當日走貶（日變動&gt;0）且貶破 32.5 代表外資匯出提款，系統自動置頂『新穀倉1』與『政策內需防彈衣』。"
 
     return clean_html(f"""
     <div class="war-hero-box" style="border-left-color:#38bdf8;">
