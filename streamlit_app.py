@@ -59,14 +59,29 @@ from data_engine import (
     fetch_tdcc_weekly_delta_ondemand, fetch_pair_swap_history,
     scan_all_stocks_on_demand, fetch_all_monthly_revenue_df_on_demand, verify_24m_first_breakout_batch
 )
-from charts_ui import (
-    build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
-    build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
-    build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
-    build_forecast_responsive_cards_html, compute_tw_hot_sectors,
-    build_8_indicator_panels_html, build_market_outpost_line_v244,
-    build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
-)
+import importlib, config_events, data_engine, charts_ui
+
+try:
+    from charts_ui import (
+        build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
+        build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
+        build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
+        build_forecast_responsive_cards_html, compute_tw_hot_sectors,
+        build_8_indicator_panels_html, build_market_outpost_line_v244,
+        build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
+    )
+except ImportError:
+    importlib.reload(config_events)
+    importlib.reload(data_engine)
+    importlib.reload(charts_ui)
+    from charts_ui import (
+        build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
+        build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
+        build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
+        build_forecast_responsive_cards_html, compute_tw_hot_sectors,
+        build_8_indicator_panels_html, build_market_outpost_line_v244,
+        build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
+    )
 
 ZOOM_OPT_MAP = {"自適應 (預設)": "auto", "🔍 1.5x 放大": "1.5x", "🔎 2.0x 超大": "2.0x"}
 
