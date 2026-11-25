@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime, os, json, time, re
 
-st.set_page_config(page_title="台股每日戰情室 v63.0", page_icon="🚨", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="台股每日戰情室 v63.1", page_icon="🚨", layout="wide", initial_sidebar_state="auto")
 
 st.markdown("""
 <style>
@@ -12,10 +12,10 @@ st.markdown("""
 .event-banner-red { background: linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%); color: #fff; padding: 11px 18px; border-radius: 10px; border: 2px solid #f87171; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
 .event-banner-yellow { background: linear-gradient(90deg, #422006 0%, #713f12 100%); color: #fef08a; padding: 11px 18px; border-radius: 10px; border: 2px solid #facc15; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
 .event-banner-blue { background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%); color: #e2e8f0; padding: 11px 18px; border-radius: 10px; border: 1px solid #38bdf8; margin-bottom: 12px; font-size: 15px; line-height: 1.6; }
-.radar-grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 14px; margin: 12px 0 16px 0; }
+.radar-grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 14px; margin: 12px 0 16px 0; }
 .radar-panel { background: rgba(15, 23, 42, 0.85); border-radius: 12px; padding: 15px 18px; font-size: 14.8px; line-height: 1.7; border: 1px solid rgba(255,255,255,0.18); }
 .war-score-title { font-size: 24px; font-weight: 900; color: #ffd54f; margin-bottom: 8px; line-height: 1.4; }
-.war-dim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 12px; margin: 12px 0 16px 0; }
+.war-dim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; margin: 12px 0 16px 0; }
 .war-dim-item { background: rgba(255,255,255,0.08); padding: 13px 16px; border-radius: 10px; font-size: 14.6px; line-height: 1.68; }
 .war-dim-concl { font-size: 15.8px; font-weight: 900; color: #ffd54f; margin-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 5px; display: block; }
 .meaning-note { font-size: 13.4px; color: #cbd5e1; background: rgba(0,0,0,0.28); padding: 5px 9px; border-radius: 6px; margin-top: 6px; display: block; line-height: 1.55; }
@@ -23,6 +23,23 @@ st.markdown("""
 .swap-card { background: #0f172a; color: #f8fafc; border-radius: 12px; padding: 16px 20px; border: 2px solid #38bdf8; margin-bottom: 14px; line-height: 1.72; }
 .short-ledger-ok { background: #0d231d; color: #e2e8f0; border-radius: 12px; padding: 15px 19px; border: 2px solid #00e676; margin-bottom: 14px; line-height: 1.7; }
 .short-ledger-stop { background: #2d0f14; color: #fff; border-radius: 12px; padding: 15px 19px; border: 2px solid #ff4d4f; margin-bottom: 14px; line-height: 1.7; }
+.svg-zoom-box { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; background: #09111a; }
+.svg-zoom-box img { max-width: none !important; }
+.war-hero-box, .war-hero-box-danger, .war-hero-box-warn, .radar-panel, .war-dim-item, .swap-card, .short-ledger-ok, .short-ledger-stop, .tab-guide-box, .event-banner-red, .event-banner-yellow, .event-banner-blue { overflow-wrap: anywhere; word-break: break-word; }
+
+@media (max-width: 768px) {
+    .war-hero-box, .war-hero-box-danger, .war-hero-box-warn { padding: 13px 13px; border-left-width: 5px; }
+    .war-score-title { font-size: 18px; }
+    .war-score-idx { font-size: 25px !important; display: inline-block; }
+    .war-sub-title { font-size: 16px !important; }
+    .radar-grid-2, .war-dim-grid { grid-template-columns: 1fr !important; gap: 10px; }
+    .radar-panel, .war-dim-item { padding: 11px 12px; font-size: 13.6px; line-height: 1.6; }
+    .war-dim-concl { font-size: 14.6px; }
+    .meaning-note { font-size: 12.6px; }
+    .event-banner-red, .event-banner-yellow, .event-banner-blue { font-size: 13.5px; padding: 10px 12px; }
+    .swap-card, .short-ledger-ok, .short-ledger-stop, .tab-guide-box { padding: 12px 13px; font-size: 13.6px; }
+    .svg-auto-img { width: 780px !important; min-width: 780px !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,17 +59,20 @@ from data_engine import (
 )
 from charts_ui import (
     evaluate_crash_and_bottom_radar_v244, build_event_timeline_svg_html,
-    build_realtime_and_forecast_svg_html, compute_tw_hot_sectors,
+    build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
+    build_forecast_mobile_cards_html, compute_tw_hot_sectors,
     build_8_indicator_panels_html, build_market_outpost_line_v244,
     build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
 )
+
+ZOOM_OPT_MAP = {"自適應 (預設)": "auto", "🔍 1.5x 放大": "1.5x", "🔎 2.0x 超大": "2.0x"}
 
 # ==========================================
 # 主標題與三層獨立控制列
 # ==========================================
 now_tw_dt = get_tw_now()
 now_str = now_tw_dt.strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🚨 台股每日戰情室 v63.0 (模組化秒開 ＋ 全浮動三情境預測 ＋ 8 大指標還原 ＋ 對接淘金客 v24.4)")
+st.markdown("## 🚨 台股每日戰情室 v63.1 (手機/電腦雙棲 RWD ＋ 浮動三情境預測 ＋ 8 大指標 ＋ 淘金客 v24.4)")
 
 btn_c1, btn_c2, btn_c3, btn_c4 = st.columns([1.8, 2.0, 1.5, 1.7])
 if btn_c1.button("⚡ 秒速刷新大盤與四水庫 (2秒)", use_container_width=True):
@@ -91,7 +111,8 @@ tsm_q, nvda_q = us_data["quotes"].get("TSM", {}), us_data["quotes"].get("NVDA", 
 tsm_chg, tsm_ext = tsm_q.get("chg_pct", 0.0), (f" ({tsm_q['ext_label']})" if tsm_q.get("ext_label") else "")
 nvda_chg, nvda_ext = nvda_q.get("chg_pct", 0.0), (f" ({nvda_q['ext_label']})" if nvda_q.get("ext_label") else "")
 fx_now, fx_ma5, fx_chg_ntd = deriv["fx_now"], deriv["fx_ma5"], deriv["fx_chg_ntd"]
-fx_stopped_dep = bool(fx_chg_ntd <= 0.0 or fx_now <= fx_ma5)
+# 修正微調 4：嚴格以當日未走貶 (fx_chg_ntd <= 0) 判定台幣止貶，當日走貶誠實顯示續貶
+fx_stopped_dep = bool(fx_chg_ntd <= 0.0)
 macro_withdrawal_alert = bool(tnx_val >= 5.0 and fx_now >= 32.50)
 
 def _run_layer2_scan():
@@ -106,7 +127,7 @@ price_dict_active = scan_data["price_dict"] if scan_data else fast_prices
 all_scanned_details = scan_data["all_details"] if scan_data else {}
 msci_data = scan_data["msci_data"] if scan_data else fetch_dynamic_msci_data(1)
 
-# ================= 左側雙階讀取覆寫控制台 (100% 全浮動帶入) =================
+# ================= 左側雙階讀取覆寫控制台 (手機自動收合，點左上角 > 展開) =================
 with st.sidebar:
     st.markdown("### 🎛️ 雙階讀取覆寫控制台 (全浮動)")
     st.caption(f"📡 期貨：{deriv['fut_src']} ｜ 融資：{deriv['margin_src']} ｜ 價差：{deriv['basis_src']}")
@@ -151,8 +172,9 @@ if next_ev:
     </div>
     """), unsafe_allow_html=True)
 
-with st.expander("🗓️ 點此展開【自動滾動風險事件視覺化時間軸圖（已去重）＋ 數據公布後多空劇本表 ＋ 自訂事件新增】", expanded=False):
-    st.markdown(build_event_timeline_svg_html(upcoming_ev_rows), unsafe_allow_html=True)
+with st.expander("🗓️ 點此展開【自動滾動風險事件視覺化時間軸圖（可放大滑動）＋ 多空劇本表 ＋ 自訂事件新增】", expanded=False):
+    ev_zoom_lbl = st.radio("🔍 時間軸圖表縮放倍率", list(ZOOM_OPT_MAP.keys()), horizontal=True, key="ev_svg_zoom")
+    st.markdown(build_event_timeline_svg_html(upcoming_ev_rows, zoom_mode=ZOOM_OPT_MAP[ev_zoom_lbl]), unsafe_allow_html=True)
     st.dataframe(pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in ev_rows]), use_container_width=True, hide_index=True)
 
     st.markdown("##### ➕ 新增單次突發風險事件")
@@ -287,10 +309,10 @@ with tab1:
     st.markdown(clean_html(f"""
     <div class="{hero_cls}">
     <div class="war-score-title">
-    📊 台股加權指數：<span style="font-size:34px; color:{idx_col};">{fleet['twii_now']:,.1f} 點 ({fleet['twii_chg_pct']:+.2f}%)</span>
+    📊 台股加權指數：<span class="war-score-idx" style="font-size:34px; color:{idx_col};">{fleet['twii_now']:,.1f} 點 ({fleet['twii_chg_pct']:+.2f}%)</span>
     &nbsp;｜&nbsp; {radar['master_badge']}
     </div>
-    <div style="font-size:14.6px; color:#e2e8f0; background:rgba(0,0,0,0.35); padding:8px 14px; border-radius:8px; margin-bottom:10px; line-height:1.68;">
+    <div style="font-size:14.4px; color:#e2e8f0; background:rgba(0,0,0,0.35); padding:8px 13px; border-radius:8px; margin-bottom:10px; line-height:1.68;">
     • 🕒 <b>三源最新對時</b>：{fleet['date_str']}（{fleet['quote_src']}｜開 <b>{fleet['twii_open']:,.0f}</b> ／ 低 <b>{fleet['twii_low']:,.0f}</b> ～ 高 <b>{fleet['twii_high']:,.0f}</b> ／ 昨收 <b>{fleet['twii_prev_c']:,.0f}</b>）｜ <b>月20MA：{fleet['m_ma20']:,.0f}</b> ｜ <b>年線：{fleet['ma240']:,.0f}</b><br>
     • ⚖️ <b>模組 0 最高權限指令</b>：<b style="color:#fde047;">{radar['master_action']}</b><br>
     • {ban_badge} ｜ 連站10MA：<b>{fleet['twii_consec_above_ma10']} 日</b> ｜ 市場廣度（{breadth['src']}）：<b>上漲比 {breadth['adv_ratio_pct']:.0f}%（漲停 {sb_limit_up} 家 ／ 跌停 {sb_limit_dn} 家）</b>
@@ -372,12 +394,27 @@ with tab1:
         if st.session_state.get("mode_b_pkg_txt"):
             st.code(st.session_state["mode_b_pkg_txt"], language="text")
 
-    # v63.0 全新升級：左側 40 日真實歷史 ＋ 右側全浮動三情境預測走勢圖 ＆ 預測作戰表
-    st.markdown(build_realtime_and_forecast_svg_html(fleet, radar, forecast), unsafe_allow_html=True)
-    st.markdown("#### 🔮 【未來 1～4 週大盤走勢預測與三情境作戰表】（100% 動態浮動：每日依均線、ATR、外資ΔOI與事件重算）")
-    st.dataframe(pd.DataFrame(forecast["table_rows"]), use_container_width=True, hide_index=True)
+    # v63.1 校準版走勢圖：縮放控制列 ＋ 原圖下載 ＋ 手機/電腦雙棲作戰視圖
+    fc_ctrl1, fc_ctrl2 = st.columns([3.2, 1.8])
+    fc_zoom_lbl = fc_ctrl1.radio("🔍 走勢圖縮放倍率（手機可單指橫滑）", list(ZOOM_OPT_MAP.keys()), horizontal=True, key="fc_svg_zoom")
+    svg_raw_bytes = build_realtime_forecast_svg_raw(fleet, radar, forecast).encode("utf-8")
+    fc_ctrl2.download_button(
+        label="📥 下載高解析 SVG 原圖 (無限放大)",
+        data=svg_raw_bytes,
+        file_name=f"twii_forecast_{fleet['twii_date_iso']}.svg",
+        mime="image/svg+xml",
+        use_container_width=True
+    )
+    st.markdown(build_realtime_and_forecast_svg_html(fleet, radar, forecast, zoom_mode=ZOOM_OPT_MAP[fc_zoom_lbl]), unsafe_allow_html=True)
 
-    # v63.0 完整還原：8 大【先結論、後數據、附數字含意】評估面板
+    st.markdown("#### 🔮 【未來 1～4 週大盤走勢預測與三情境作戰表】（100% 動態浮動：每日依均線、ATR、外資ΔOI與事件重算）")
+    fc_view_mode = st.radio("📱 顯示樣式切換", ["📊 表格模式 (電腦)", "📱 直式卡片 (手機推薦)"], horizontal=True, key="fc_view_mode")
+    if "卡片" in fc_view_mode:
+        st.markdown(build_forecast_mobile_cards_html(forecast), unsafe_allow_html=True)
+    else:
+        st.dataframe(pd.DataFrame(forecast["table_rows"]), use_container_width=True, hide_index=True)
+
+    # 8 大【先結論、後數據、附數字含意】評估面板
     st.markdown(build_8_indicator_panels_html(
         fleet, us_data, deriv_eff, breadth, scan_data, tw_hot_sec_info,
         sb_fini_oi, sb_margin_2d, sb_margin_2d_pct, sb_margin_dd, sb_maint, sb_basis,
