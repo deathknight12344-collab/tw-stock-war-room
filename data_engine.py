@@ -586,7 +586,10 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
     if not tx_ok:
         res["basis_src"] = f"跨日待盤後同步(現貨{twii_date_iso})"
 
-    # D2. 🌙 新增：台指期夜盤（盤後電子盤 MarketType=1）追蹤與 09:00 開盤跳空預警
+    # D2. 🌙 v64.1 三層台指期夜盤備援（期交所MIS即時 ➔ 期交所OpenAPI盤後 ➔ FinMind after_market ＋ NQ即時代理）
+    res["night_src"], res["night_is_live_mis"], res["night_nq_chg"] = "", False, None
+    night_ok = False
+    # 通道 1：期交所 MIS 即時夜盤 (MarketType=1)
     try:
         r_ah = requests.post(
             "https://mis.taifex.com.tw/futures/api/getQuoteList",
@@ -613,13 +616,65 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
                 c_dt = parse_roc_or_iso_date(q0.get("CDate", ""))
                 c_tm = str(q0.get("CTime", "")).strip()
                 tm_fmt = f"{c_tm[:2]}:{c_tm[2:4]}" if len(c_tm) >= 4 and c_tm[:4].isdigit() else c_tm
-                res["night_valid"] = True
+                res["night_valid"], res["night_is_live_mis"], night_ok = True, True, True
                 res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = n_last, n_chg, n_pct
-                res["night_tx_time"] = f"{c_dt} {tm_fmt}".strip()
+                res["night_tx_time"], res["night_src"] = f"{c_dt} {tm_fmt}".strip(), "期交所MIS即時"
     except Exception:
         pass
 
-    # E. 真實大盤融資曲線
+    # 通道 2：期交所 OpenAPI 盤後結算 (TradingSession 含 盤後 / After)
+    if not night_ok:
+        try:
+            r_ah2 = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", headers=headers, timeout=5, verify=False)
+            if r_ah2.status_code == 200 and isinstance(r_ah2.json(), list):
+                ah_o = [
+                    row for row in r_ah2.json()
+                    if str(row.get("Contract", "")).strip() == "TX"
+                    and len(str(row.get("ContractMonth(Week)", "")).strip()) == 6
+                    and ("盤後" in str(row.get("TradingSession", "")) or "After" in str(row.get("TradingSession", "")))
+                ]
+                if ah_o:
+                    ah_o.sort(key=lambda x: str(x.get("ContractMonth(Week)", "")))
+                    r0 = ah_o[0]
+                    n_last = float(str(r0.get("Last", r0.get("Close", "0"))).replace(",", "").strip() or 0)
+                    n_chg_s = str(r0.get("Change", "0")).replace(",", "").replace("+", "").strip()
+                    n_chg = float(n_chg_s) if n_chg_s not in ["", "-", "--"] else 0.0
+                    n_pct_s = str(r0.get("Change%", "0")).replace("%", "").replace("+", "").strip()
+                    n_pct = float(n_pct_s) if n_pct_s not in ["", "-", "--"] else round((n_chg / max(1.0, n_last - n_chg)) * 100.0, 2)
+                    if n_last > 5000:
+                        f_iso = parse_roc_or_iso_date(r0.get("Date", ""))
+                        res["night_valid"], night_ok = True, True
+                        res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = round(n_last, 0), round(n_chg, 0), round(n_pct, 2)
+                        res["night_tx_time"], res["night_src"] = f"{f_iso} 05:00結算", "期交所OpenAPI盤後"
+        except Exception:
+            pass
+
+    # 通道 3：FinMind TaiwanFuturesDaily 夜盤結算 (after_market)
+    if not night_ok:
+        try:
+            st_ah = (now_tw - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+            r_ah3 = requests.get(f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date={st_ah}", timeout=5, verify=False)
+            if r_ah3.status_code == 200 and r_ah3.json().get("data"):
+                df_ah = pd.DataFrame(r_ah3.json()["data"])
+                df_ah = df_ah[(df_ah["trading_session"] == "after_market") & (df_ah["contract_date"].astype(str).str.len() == 6)]
+                if not df_ah.empty:
+                    ld_ah = str(df_ah["date"].max())
+                    r0 = df_ah[df_ah["date"] == ld_ah].sort_values("contract_date").iloc[0]
+                    n_last = float(r0.get("close", 0) or 0)
+                    n_chg = float(r0.get("spread", 0) or 0)
+                    n_pct = float(r0.get("spread_per", 0) or 0)
+                    if n_last > 5000:
+                        res["night_valid"], night_ok = True, True
+                        res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = round(n_last, 0), round(n_chg, 0), round(n_pct, 2)
+                        res["night_tx_time"], res["night_src"] = f"{ld_ah} 05:00結算", "FinMind夜盤結算"
+        except Exception:
+            pass
+
+    # 雲端主機無法直連期交所 MIS 即時夜盤時，補抓那指期 (NQ=F) 作為今晚即時電子盤代理
+    if not res["night_is_live_mis"]:
+        nq_live = fetch_yahoo_v8_realtime("NQ=F", decimals=2)
+        if nq_live:
+            res["night_nq_chg"] = nq_live.get("chg_pct", 0.0)
     mgn_ok = False
     try:
         st_m = (now_tw - datetime.timedelta(days=55)).strftime("%Y-%m-%d")
