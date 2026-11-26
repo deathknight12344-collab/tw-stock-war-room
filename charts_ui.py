@@ -6,7 +6,7 @@ from config_events import clean_html, xml_esc, map_tw_theme_cluster, get_tw_now
 from data_engine import fetch_single_stock_anti_trap
 
 # ==========================================
-# 共用：SVG 響應式縮放包裝器 ＋ 🌙 夜盤三層顯示格式化
+# 共用：SVG 響應式縮放包裝器 ＋ 🌙 夜盤三層顯示格式化（含舊夜盤隔離）
 # ==========================================
 def _wrap_svg_zoom(svg_xml: str, zoom_mode: str = "auto") -> str:
     b64_svg = base64.b64encode(svg_xml.encode("utf-8")).decode("utf-8")
@@ -25,23 +25,27 @@ def _wrap_svg_zoom(svg_xml: str, zoom_mode: str = "auto") -> str:
     )
 
 def _format_night_tx_segment(deriv: dict, now_tw_dt, nq_chg_override=None) -> str:
-    """智慧區分『期交所MIS即時夜盤』、『今晨05:00結算夜盤』與『今晚NQ即時代理』，不誤導時間"""
+    """智慧區分『期交所MIS即時夜盤』、『今晨結算夜盤』、『昨日已反映舊夜盤』與『NQ即時代理』"""
     nq_v = nq_chg_override if nq_chg_override is not None else deriv.get("night_nq_chg")
     is_live_mis = bool(deriv.get("night_is_live_mis", False))
+    is_stale = bool(deriv.get("night_is_stale", False))
     t_min = now_tw_dt.hour * 60 + now_tw_dt.minute
-    is_evening_session = (now_tw_dt.weekday() < 5) and (t_min >= 900)  # 15:00 後新夜盤已開盤
+    is_evening_session = (now_tw_dt.weekday() < 5) and (t_min >= 900)
 
     if deriv.get("night_valid") and deriv.get("night_tx_close", 0) > 5000:
         nc, n_chg, n_pct = deriv["night_tx_close"], deriv["night_tx_chg"], deriv["night_tx_chg_pct"]
         n_col = "#ff8a80" if n_chg >= 0 else "#69f0ae"
         tm_s, src_s = deriv.get("night_tx_time", ""), deriv.get("night_src", "")
-        if is_live_mis:
+        if is_live_mis and (not is_stale):
             return f"🌙 <b>台指期夜盤即時</b>：<b style='color:{n_col};'>{nc:,.0f} ({n_chg:+,.0f}點 / {n_pct:+.2f}%)</b> <span style='color:#94a3b8; font-size:12.5px;'>[{src_s} {tm_s}]</span>"
+        elif is_stale:
+            nq_s = f"⚡ <b>即時電子盤代理(那指期NQ)</b>：<b style='color:{'#ff8a80' if nq_v>=0 else '#69f0ae'};'>{nq_v:+.2f}%</b> ｜ " if nq_v is not None else ""
+            return f"{nq_s}<span style='color:#94a3b8;'>🌙 舊夜盤(已反映・{tm_s})：{nc:,.0f} ({n_chg:+,.0f} / {n_pct:+.2f}%)</span>"
         elif is_evening_session:
             nq_s = f" ｜ ⚡ <b>今晚即時代理(那指期NQ)</b>：<b style='color:{'#ff8a80' if nq_v>=0 else '#69f0ae'};'>{nq_v:+.2f}%</b>" if nq_v is not None else ""
-            return f"🌙 <b>上盤夜盤結算</b>：<b style='color:{n_col};'>{nc:,.0f} ({n_chg:+,.0f}點 / {n_pct:+.2f}%)</b> <span style='color:#94a3b8; font-size:12.5px;'>[{tm_s}]</span>{nq_s}"
+            return f"🌙 <b>今晨夜盤結算</b>：<b style='color:{n_col};'>{nc:,.0f} ({n_chg:+,.0f}點 / {n_pct:+.2f}%)</b> <span style='color:#94a3b8; font-size:12.5px;'>[{tm_s}]</span>{nq_s}"
         else:
-            return f"🌙 <b>台指期夜盤結算</b>：<b style='color:{n_col};'>{nc:,.0f} ({n_chg:+,.0f}點 / {n_pct:+.2f}%)</b> <span style='color:#94a3b8; font-size:12.5px;'>[{src_s} {tm_s}]</span>"
+            return f"🌙 <b>今晨台指期夜盤結算</b>：<b style='color:{n_col};'>{nc:,.0f} ({n_chg:+,.0f}點 / {n_pct:+.2f}%)</b> <span style='color:#94a3b8; font-size:12.5px;'>[{src_s} {tm_s}]</span>"
     if nq_v is not None:
         return f"⚡ <b>夜盤即時代理(那指期NQ)</b>：<b style='color:{'#ff8a80' if nq_v>=0 else '#69f0ae'};'>{nq_v:+.2f}%</b> <span style='color:#94a3b8; font-size:12.5px;'>(期交所MIS雲端受限)</span>"
     return ""
@@ -70,7 +74,7 @@ def build_intraday_timeline_banner_html(now_tw_dt, master_state: str, deriv: dic
         else:
             slot_lbl, tip, b_col, bg = "🔔 09:00-09:15 開盤定型期", "觀察跳空缺口是否迅速回補與開盤量能方向，不急於首 5 分鐘追高殺低。", "#fbbf24", "#2e2409"
     elif t_min < 600:
-        slot_lbl, tip, b_col, bg = "📊 09:15-10:00 流動性穩定窗口", "盤面價差收斂、真買賣盤現形，適合執行分批減碼、換股對敲或守線檢核。", "#00e676", "#0d231d"
+        slot_lbl, tip, b_col, bg = "📊 09:15-10:00 流動性穩定窗口", "盤面價差收斂、真買賣盤現形，適合執行分批減碼、股轉債或守線檢核。", "#00e676", "#0d231d"
     elif t_min < 660:
         slot_lbl, tip, b_col, bg = "🌏 10:00-11:00 亞股連動檢驗期", "日股/韓股/港股方向定調，檢視早盤強勢股是否能守住開盤價與均價線。", "#38bdf8", "#0f172a"
     elif t_min < 700:
@@ -93,7 +97,7 @@ def build_intraday_timeline_banner_html(now_tw_dt, master_state: str, deriv: dic
     """)
 
 # ==========================================
-# 1. 模組 0（對接淘金客 v24.4）：三階燈號 × 四軌落底 × 政策逃命波
+# 1. 模組 0（對接淘金客 v24.4）：三階燈號 × 四軌落底 × 盤中廣度防呆 × 觸發依據透明化
 # ==========================================
 def evaluate_crash_and_bottom_radar_v244(
     twii_now, twii_chg_pct, twii_ma60, twii_ma120, twii_ma240, twii_30d_dd_pct, sp500_below_ma200,
@@ -101,7 +105,8 @@ def evaluate_crash_and_bottom_radar_v244(
     bottom_4track: dict, limit_up_cnt: int, adv_ratio_pct: float,
     basis_pts, basis_valid: bool, basis_stabilized: bool, consec_cover_days, cover_3d_sum,
     fx_stopped_dep, limit_down_cnt, had_limit_down_100,
-    ban_active, days_since_ban, consec_above_ma10
+    ban_active, days_since_ban, consec_above_ma10,
+    breadth_is_stale: bool = False
 ) -> dict:
     fini_tag = f"{fini_oi:+,} 口 【🚨極限對沖】" if fini_oi < -80000 else f"{fini_oi:+,} 口"
     w_items = [
@@ -115,9 +120,19 @@ def evaluate_crash_and_bottom_radar_v244(
     crash_warning_on = (w_count >= 3)
 
     basis_rate_pct = round((abs(basis_pts) / max(1.0, twii_now)) * 100.0, 2) if (basis_valid and basis_pts < 0) else 0.0
-    b1_ok = (margin_dd_pct >= twii_30d_dd_pct) or (margin_2d_chg_yi <= -500.0) or (margin_2d_pct <= -7.0) or (maint_pct <= 150.0)
 
-    hit_2c_override = (twii_chg_pct >= 4.0) and ((limit_up_cnt >= 100) or (adv_ratio_pct >= 85.0))
+    # ① 明確列出觸發依據，解決「維持率 161% 卻亮綠燈」的視覺困惑
+    b1_hits = []
+    if margin_dd_pct >= twii_30d_dd_pct:
+        b1_hits.append(f"30日融資減-{margin_dd_pct:.1f}% ≧ 大盤-{twii_30d_dd_pct:.1f}%✅")
+    if margin_2d_chg_yi <= -500.0 or margin_2d_pct <= -7.0:
+        b1_hits.append(f"近2日急減{margin_2d_chg_yi:+.1f}億/{margin_2d_pct:+.1f}%✅")
+    if maint_pct <= 150.0:
+        b1_hits.append(f"維持率{maint_pct:.1f}%≦150%✅")
+    b1_ok = len(b1_hits) > 0
+    b1_reason = " ｜ ".join(b1_hits) if b1_ok else f"近2日 {margin_2d_chg_yi:+.1f}億/{margin_2d_pct:+.1f}% ｜ 維持率 {maint_pct:.1f}% ｜ 30日減-{margin_dd_pct:.1f}%"
+
+    hit_2c_override = (not breadth_is_stale) and (twii_chg_pct >= 4.0) and ((limit_up_cnt >= 100) or (adv_ratio_pct >= 85.0))
     b2_ok = bool(bottom_4track.get("passed", False) or hit_2c_override)
     b2_detail = bottom_4track.get("detail", "")
     if hit_2c_override and not bottom_4track.get("passed", False):
@@ -131,12 +146,19 @@ def evaluate_crash_and_bottom_radar_v244(
 
     b4_ok = (consec_cover_days >= 3) and (cover_3d_sum >= 10000) and fx_stopped_dep
 
+    if breadth_is_stale:
+        b5_ok = False
+        b5_desc = f"前日收盤跌停 <b>{limit_down_cnt} 家</b>（盤中待 14:30 結算今日家數，暫不誤計）"
+    else:
+        b5_ok = bool(had_limit_down_100 and (limit_down_cnt < 20))
+        b5_desc = f"當日跌停 <b>{limit_down_cnt} 家</b> {'< 20家達標✅' if b5_ok else '尚未收斂至<20家'}"
+
     b_items = [
-        (b1_ok, f"① 融資真斷頭（近2日 <b>{margin_2d_chg_yi:+.1f}億 / {margin_2d_pct:+.1f}%</b> ｜ 維持率 <b>{maint_pct:.1f}%</b>）"),
+        (b1_ok, f"① 融資籌碼清洗達標（<b>{b1_reason}</b> ｜ 維持率 {maint_pct:.1f}%）"),
         (b2_ok, f"② 四軌價量／廣度反轉（<b>{b2_detail}</b>）"),
         (b3_ok, f"③ 恐慌逆價差率 ≧ 0.8% 收斂（{b3_desc}）"),
         (b4_ok, f"④ 外資空單連3日回補&gt;1萬口(ΔOI)＋台幣止貶（連補 <b>{consec_cover_days}日 / {cover_3d_sum:+,}口</b> ｜ 台幣{'已止貶✅' if fx_stopped_dep else '續貶⚠️'}）"),
-        (had_limit_down_100 and (limit_down_cnt < 20), f"⑤ 恐慌廣度收斂（當日跌停 <b>{limit_down_cnt} 家</b> {'< 20家達標' if (had_limit_down_100 and limit_down_cnt < 20) else '尚未收斂至<20家'}）")
+        (b5_ok, f"⑤ 恐慌廣度收斂（{b5_desc}）")
     ]
     b_count = sum(1 for flag, _ in b_items if flag)
     bottom_confirmed = (b_count >= 4)
@@ -169,15 +191,16 @@ def evaluate_crash_and_bottom_radar_v244(
     }
 
 # ==========================================
-# 1B. v64.1 校準：【📋 當日戰情總結 ＆ 未來 3 日多空推演卡】（盤前/盤中/盤後自動換口吻 ＋ 日月光破5MA醒目紅警）
+# 1B. v64.2：【📋 當日戰情總結 ＆ 未來 3 日多空推演卡】（同步 11/26 持股與鎖定操作紀律）
 # ==========================================
 def build_daily_summary_and_3day_card_html(
     fleet: dict, radar: dict, deriv: dict, us_data: dict, forecast: dict, next_ev: dict,
-    p_3711: float, ma5_3711: float, sb_short_3711_be: float, sb_shares_3711_short: int, etf_m: dict
+    p_3711: float, ma5_3711: float, sb_short_3711_be: float, sb_shares_3711_short: int, etf_m: dict,
+    lots_00400a: float = 5.0, lots_00985b: float = 25.0, twd_cash_wan: float = 44.8, fish_price_3711: float = 450.0
 ) -> str:
     now_tw = get_tw_now()
     t_min = now_tw.hour * 60 + now_tw.minute
-    is_post_close = (now_tw.weekday() >= 5) or (t_min >= 810)   # 13:30 後／週末：盤後覆盤語氣
+    is_post_close = (now_tw.weekday() >= 5) or (t_min >= 810)
     is_intraday = (now_tw.weekday() < 5) and (540 <= t_min < 810)
 
     tw, chg_tw = fleet["twii_now"], fleet["twii_chg_pct"]
@@ -187,19 +210,21 @@ def build_daily_summary_and_3day_card_html(
     tsm_chg, tsm_ext = tsm_q.get("chg_pct", 0.0), (f"({tsm_q['ext_label']})" if tsm_q.get("ext_label") else "")
     nvda_chg = us_data["quotes"].get("NVDA", {}).get("chg_pct", 0.0)
     nq_chg = us_data.get("nq_chg", 0.0)
-    night_ok, is_live_mis = deriv.get("night_valid", False), deriv.get("night_is_live_mis", False)
+
+    night_fresh = bool(deriv.get("night_valid", False) and (not deriv.get("night_is_stale", False)))
+    is_live_mis = bool(deriv.get("night_is_live_mis", False))
     n_close, n_chg, n_pct = deriv.get("night_tx_close", 0.0), deriv.get("night_tx_chg", 0.0), deriv.get("night_tx_chg_pct", 0.0)
 
     pos_240 = f"守住年線 <b>{ma240:,.0f}</b>" if tw >= ma240 else f"失守年線 <b>{ma240:,.0f}</b>"
-    pos_5 = f"暫守日 5MA (<b>{ma5:,.0f}</b>)" if tw >= ma5 else f"跌破日 5MA (<b>{ma5:,.0f}</b>)"
+    pos_5 = f"穩守日 5MA (<b>{ma5:,.0f}</b>)" if tw >= ma5 else f"跌破日 5MA (<b>{ma5:,.0f}</b>)"
 
-    # 1. 今日大盤多空定調（依盤前 / 盤中 / 盤後自動切換正確時態與邏輯）
+    # 1. 今日大盤多空定調
     if is_post_close:
         card_subtitle = "盤後覆盤 ＆ 明日作戰前瞻"
         fwd_look = (
             f"今晚緊盯台指期即時夜盤 <b>{n_close:,.0f} ({n_chg:+,.0f}點 / {n_pct:+.2f}%)</b>"
-            if (night_ok and is_live_mis)
-            else f"今晚緊盯美股電子盤（那指期 NQ <b style='color:{'#ff8a80' if nq_chg>=0 else '#69f0ae'};'>{nq_chg:+.2f}%</b> ／ 台積ADR {tsm_chg:+.2f}%{tsm_ext}）確認明日開盤跳空方向"
+            if (night_fresh and is_live_mis)
+            else f"今晚緊盯美股電子盤（那指期 NQ <b style='color:{'#ff8a80' if nq_chg>=0 else '#69f0ae'};'>{nq_chg:+.2f}%</b> ／ 台積ADR {tsm_chg:+.2f}%{tsm_ext}）確認明日跳空方向"
         )
         spot_brief = f"外資現貨 <b>{deriv['spot_fini_yi']:+.1f}億</b>、期貨空單 <b>{deriv['fini_tx_oi']:+,}口</b>" if deriv.get("spot_valid") else f"外資期貨空單 <b>{deriv['fini_tx_oi']:+,}口</b>"
         if chg_tw <= -2.0:
@@ -210,61 +235,70 @@ def build_daily_summary_and_3day_card_html(
             today_tone = f"🟡 <b>盤後覆盤・區間換手</b>：今日實收 <b>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>（{pos_240} ／ {pos_5}）；{spot_brief}。{fwd_look}。"
     elif is_intraday:
         card_subtitle = "盤中即時控盤 ＆ 10 秒掌握怎麼做"
+        b_core = fleet.get("breadth", {})
+        rt_core_str = f"（核心權值即時 {b_core.get('core_rt_up', 0)}漲/{b_core.get('core_rt_dn', 0)}跌）" if (b_core.get("core_rt_up", 0) + b_core.get("core_rt_dn", 0)) > 0 else ""
         if chg_tw <= -2.0:
-            today_tone = f"🔴 <b>盤中急殺測撐</b>：目前加權 <b style='color:#69f0ae;'>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>，{pos_240}、{pos_5}；緊盯 10:00 亞股與 13:00 尾盤是否收腳守 5MA。"
-        elif chg_tw >= 2.0:
-            today_tone = f"🟢 <b>盤中強彈攻堅</b>：目前加權 <b style='color:#ff8a80;'>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>，挑戰 10MA (<b>{ma10:,.0f}</b>) 與月線 (<b>{ma20:,.0f}</b>) 反壓，留意高當沖假突破。"
+            today_tone = f"🔴 <b>盤中急殺測撐</b>：目前加權 <b style='color:#69f0ae;'>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>{rt_core_str}，{pos_240}、{pos_5}；緊盯 10:00 亞股與 13:00 尾盤是否收腳。"
+        elif chg_tw >= 1.5:
+            today_tone = f"🟢 <b>盤中強彈攻堅</b>：目前加權 <b style='color:#ff8a80;'>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>{rt_core_str}，挑戰 10MA (<b>{ma10:,.0f}</b>) 與年線 (<b>{ma240:,.0f}</b>) 反壓；紅燈反彈嚴禁追高，留意高當沖假突破。"
         else:
-            today_tone = f"🟡 <b>盤中多空拉鋸</b>：目前加權 <b>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>（{pos_240} ／ {pos_5}），靜待尾盤收線確認。"
+            today_tone = f"🟡 <b>盤中多空拉鋸</b>：目前加權 <b>{tw:,.0f}點 ({chg_tw:+.2f}%)</b>{rt_core_str}（{pos_240} ／ {pos_5}），靜待尾盤收線確認。"
     else:
         card_subtitle = "盤前跳空預警 ＆ 10 秒掌握今日怎麼做"
-        if night_ok and n_pct <= -1.5:
-            today_tone = f"🔴 <b>盤前偏空・跳空回測警報</b>：隔夜費半 <b>{sox_chg:+.2f}%</b>／台積ADR <b>{tsm_chg:+.2f}%</b>，台指期夜盤重挫 <b style='color:#69f0ae;'>{n_chg:+,.0f}點 ({n_pct:+.2f}%) 收 {n_close:,.0f}</b>，09:00 開盤恐直接回測年線 <b>{ma240:,.0f}</b> 與 5MA <b>{ma5:,.0f}</b>！"
+        if night_fresh and n_pct <= -1.5:
+            today_tone = f"🔴 <b>盤前偏空・跳空回測警報</b>：隔夜費半 <b>{sox_chg:+.2f}%</b>／台積ADR <b>{tsm_chg:+.2f}%</b>，台指期夜盤重挫 <b style='color:#69f0ae;'>{n_chg:+,.0f}點 ({n_pct:+.2f}%) 收 {n_close:,.0f}</b>，開盤防回測年線 <b>{ma240:,.0f}</b> 與 5MA <b>{ma5:,.0f}</b>！"
         elif sox_chg <= -3.0 or tsm_chg <= -2.5:
             today_tone = f"🔴 <b>盤前偏空・防開低回測</b>：隔夜費半重挫 <b>{sox_chg:+.2f}%</b>（輝達 {nvda_chg:+.2f}%／台積ADR {tsm_chg:+.2f}%），早盤承壓測試年線 <b>{ma240:,.0f}</b> 與日 5MA <b>{ma5:,.0f}</b>。"
-        elif (night_ok and n_pct >= 1.2) or (sox_chg >= 2.5 and tsm_chg >= 2.0):
-            n_txt = f"＋夜盤 {n_chg:+,.0f}點({n_pct:+.2f}%)" if night_ok else ""
+        elif (night_fresh and n_pct >= 1.2) or (sox_chg >= 2.5 and tsm_chg >= 2.0):
+            n_txt = f"＋夜盤 {n_chg:+,.0f}點({n_pct:+.2f}%)" if night_fresh else ""
             today_tone = f"🟢 <b>盤前短多・上攻測壓</b>：美股半導體強彈（費半 {sox_chg:+.2f}%／台積ADR {tsm_chg:+.2f}%{n_txt}），早盤挑戰 10MA <b>{ma10:,.0f}</b> 與月線 <b>{ma20:,.0f}</b> 反壓。"
         else:
-            today_tone = f"🟡 <b>盤前區間震盪</b>：加權現處 <b>{tw:,.0f}點</b>（年線 {ma240:,.0f}／10MA {ma10:,.0f} 之間），靜待開盤 09:15 後流動性穩定再定調。"
+            today_tone = f"🟡 <b>盤前區間震盪</b>：加權現處 <b>{tw:,.0f}點</b>（年線 {ma240:,.0f}／10MA {ma10:,.0f} 之間），靜待 09:15 後流動性穩定再定調。"
 
     # 2. 未來 3 日多空方向預判
     ev_3d = f"⚠️ 未來 3 日內強震事件：<b>{next_ev['日期']} {next_ev['重大風險事件']}</b>（事件前嚴禁追價與槓桿）" if (next_ev and next_ev["_days"] <= 3) else f"📅 下個關鍵事件：{next_ev['日期']} {next_ev['_short']}（尚餘 {next_ev['_days']} 天）"
-    k60_note = f"60分K高檔鈍化(J={fleet['k60_j']:.0f})易震盪回吐" if fleet["k60_j"] >= 95 else (f"60分K動能下彎(J={fleet['k60_j']:.0f})尚在尋底" if fleet["k60_j"] < fleet["k60_j_prev"] else f"60分K(J={fleet['k60_j']:.0f})醞釀換手")
+    k60_note = f"60分K高檔鈍化(J={fleet['k60_j']:.0f})易震盪回吐" if fleet["k60_j"] >= 95 else (f"60分K動能下彎(J={fleet['k60_j']:.0f})尚在尋底" if fleet["k60_j"] < fleet["k60_j_prev"] else f"60分K(J={fleet['k60_j']:.0f})換手走揚")
     probs = forecast["probs"]
     if radar["master_state"] == "RED_LOCKED":
-        d3_dir = f"<b>🟡 先震盪測撐、反覆築底（主路徑機率 {probs['base']}%／保守 {probs['bear']}%）</b>：{k60_note}，加上外資大台空單仍達 <b>{deriv['fini_tx_oi']:+,} 口</b>、政策逃命波驗證未過（連站10MA {fleet['twii_consec_above_ma10']}/3日），3 日內大概率在 <b>日5MA({ma5:,.0f}) ～ 月線({ma20:,.0f})</b> 間劇烈洗刷。{ev_3d}。"
+        d3_dir = f"<b>🟡 先震盪測壓、反覆築底（主路徑機率 {probs['base']}%／保守 {probs['bear']}%）</b>：{k60_note}，外資大台空單仍達 <b>{deriv['fini_tx_oi']:+,} 口</b>、政策逃命波驗證未過（連站10MA {fleet['twii_consec_above_ma10']}/3日），3 日內大概率在 <b>日5MA({ma5:,.0f}) ～ 月線({ma20:,.0f})</b> 間劇烈洗刷，慎防 11/30 MSCI 尾盤甩尾與 12 月初聽證/FOMC 變數。{ev_3d}。"
     elif radar["master_state"] == "YELLOW":
         d3_dir = f"<b>🟡 季半年線攻防震盪（基準 {probs['base']}%）</b>：{k60_note}，觀察能否站回 10MA({ma10:,.0f}) 與月線({ma20:,.0f})。{ev_3d}。"
     else:
         d3_dir = f"<b>🟢 偏多墊高、沿均線推進（基準 {probs['base']}%／樂觀 {probs['bull']}%）</b>：守穩日 10MA({ma10:,.0f}) 續走多頭軌道。{ev_3d}。"
 
-    # 3. 實戰操作建議（v64.1 強化：日月光短單跌破 5MA 或平衡價直接亮紅字醒目警示！）
+    # 3. 實戰操作建議（完整同步 11/26 持股與鎖定紀律）
     t1_400, t2_400 = etf_m["00400A"]["exit_t1"], etf_m["00400A"]["exit_t2"]
     if sb_shares_3711_short > 0:
         if p_3711 < sb_short_3711_be:
-            short_cmd = f"<span style='color:#ff8a80; font-weight:900;'>🚨【觸發硬停損撤退！】日月光 {sb_shares_3711_short}股短單 (@474) 現價 {p_3711:.1f} 已跌破損益平衡價 {sb_short_3711_be:.2f}！嚴守 v24.4 紀律 5 立即執行撤退收回現金，絕不變長單！</span>"
+            short_cmd = f"<span style='color:#ff8a80; font-weight:900;'>🚨【觸發硬停損撤退！】日月光 {sb_shares_3711_short}股短單 (@474) 現價 {p_3711:.1f} 已跌破損益平衡價 {sb_short_3711_be:.2f}！嚴守紀律 5 撤退收現金！</span>"
         elif p_3711 < ma5_3711:
-            short_cmd = f"<span style='color:#ff8a80; font-weight:900;'>⚠️【跌破 5MA 移動停利警戒！】</span><b>日月光 {sb_shares_3711_short}股短單 (@474)</b>：現價 <b style='color:#ff8a80;'>{p_3711:.1f}</b> 已跌破日 5MA (<b>{ma5_3711:.1f}</b>)（仍高於平衡價 {sb_short_3711_be:.2f}），請核對是否依紀律執行移動停利鎖盈，或緊守最後硬底線 <b>{sb_short_3711_be:.2f}</b>（紅燈執行避開 09:00-09:10 恐慌低點）！"
+            short_cmd = f"<span style='color:#ff8a80; font-weight:900;'>⚠️【跌破 5MA 移動停利警戒！】</span><b>日月光 {sb_shares_3711_short}股短單 (@474)</b> 現價 <b style='color:#ff8a80;'>{p_3711:.1f}</b> 跌破日 5MA({ma5_3711:.1f})，請核對移動停利或守死平衡價 <b>{sb_short_3711_be:.2f}</b>"
+        elif p_3711 >= 500.0:
+            short_cmd = f"<b>日月光 {sb_shares_3711_short}股短單 (@474)</b>：現價 <b style='color:#00e676;'>{p_3711:.1f}</b> 沿日 5MA({ma5_3711:.1f}) 移動停利續抱（<b style='color:#fde047;'>⛔ 嚴禁於 500 元以上追高加碼</b>，低接釣魚單只鎖定 <b>{fish_price_3711:.0f} 元</b> 區間）"
         else:
-            short_cmd = f"<b>日月光 {sb_shares_3711_short}股短單 (@474)</b>：現價 <b style='color:#00e676;'>{p_3711:.1f}</b> 站穩日 5MA (<b>{ma5_3711:.1f}</b>) 之上，沿 5MA 移動停利續抱（硬底線平衡價 {sb_short_3711_be:.2f}）。"
+            short_cmd = f"<b>日月光 {sb_shares_3711_short}股短單 (@474)</b>：現價 <b style='color:#00e676;'>{p_3711:.1f}</b> 穩守日 5MA({ma5_3711:.1f}) 與平衡價({sb_short_3711_be:.2f})，嚴禁追高、低接鎖定 <b>{fish_price_3711:.0f} 元</b> 區間"
     else:
-        short_cmd = "<b>獨立短單</b>：目前空手，嚴守紅燈禁動用新現金追買。"
+        short_cmd = f"<b>日月光低接釣魚紀律</b>：嚴禁於 500 元以上追高，水庫四現金 ({twd_cash_wan:.1f}萬) 鎖定 <b>{fish_price_3711:.0f} 元</b> 區間或 12 月初利空落地"
+
+    if lots_00400a > 0:
+        bond_cmd = f"<b>00400A 最後收尾 ({lots_00400a:.0f}張)</b>：逢彈 <b>11.22～{t2_400:.2f} 元</b> 出清轉入水庫三 <b>00985B (已累積 {lots_00985b:.0f}張)</b>"
+    else:
+        bond_cmd = f"<b>✅ 股轉債圓滿完成</b>：00400A 已全數清零、<b>00985B 穩健累積至 {lots_00985b:.0f} 張</b>，水庫二傳家寶全程死抱不動"
 
     if radar["master_state"] == "RED_LOCKED":
         action_cmd = (
-            f"① <b>新資金總開關</b>：🔴 紅燈鎖死（落底 {radar['b_count']}/5，未達 4/5 絕不抄底開槓桿）；"
+            f"① <b>新資金鎖定</b>：🔴 紅燈鎖死（落底 {radar['b_count']}/5，保留水庫四 <b>{twd_cash_wan:.1f} 萬</b> 台幣現金等 12 月初聽證/FOMC 利空落地或 4/5 共振）；"
             f"② {short_cmd}；"
-            f"③ <b>股轉債調度</b>：00400A 逢彈近 <b>{t1_400:.2f}～{t2_400:.2f} 元</b> 滾動退場轉入 <b>00985B</b>（水庫二傳家寶全程不動）。"
+            f"③ {bond_cmd}。"
         )
     elif radar["master_state"] == "BOTTOM_UNLOCKED":
-        action_cmd = f"① <b>總開關解鎖</b>：🟢 落底共振 {radar['b_count']}/5 達標！動用水庫四分 3 批布局新穀倉1龍頭；② {short_cmd}。"
+        action_cmd = f"① <b>總開關解鎖</b>：🟢 落底共振 {radar['b_count']}/5 達標！動用水庫四 ({twd_cash_wan:.1f}萬) 分 3 批布局新穀倉1龍頭；② {short_cmd}；③ {bond_cmd}。"
     else:
-        action_cmd = f"① <b>操作權限</b>：{radar['master_badge']}，以防彈衣與新穀倉1為主、嚴禁高乖離追高；② {short_cmd}；③ 00400A 逢彈 {t1_400:.2f}～{t2_400:.2f} 元轉入 00985B。"
+        action_cmd = f"① <b>操作權限</b>：{radar['master_badge']}，以防彈衣與新穀倉1為主、嚴禁高乖離追高；② {short_cmd}；③ {bond_cmd}。"
 
     # 4. 關鍵轉折監看指標
     spot_txt = f"外資現貨最新 {deriv['spot_fini_yi']:+.1f}億（{'連買' if deriv['spot_fini_consec']>0 else '連賣'}{abs(deriv['spot_fini_consec'])}日）" if deriv.get("spot_valid") else "外資現貨待盤後"
-    watch_cmd = f"① <b>強弱分水嶺</b>：守穩日 5MA <b>{ma5:,.0f}</b> 並奪回年線 <b>{ma240:,.0f}</b> 才具築底條件，站穩 10MA <b>{ma10:,.0f}</b> 連 3 日始脫離政策逃命波；② <b>三共振解鎖鍵</b>：緊盯「{spot_txt} ＋ 外資期貨 ΔOI 連 3 日回補＞萬口 ＋ 台幣止貶」。"
+    watch_cmd = f"① <b>強弱分水嶺</b>：守穩日 5MA <b>{ma5:,.0f}</b> 並奪回年線 <b>{ma240:,.0f}</b> 才具築底條件，連 3 日站穩 10MA <b>{ma10:,.0f}</b> 始脫離政策逃命波；② <b>三共振解鎖鍵</b>：緊盯「{spot_txt} ＋ 外資期貨 ΔOI 連 3 日回補＞萬口 ＋ 台幣止貶」。"
 
     b_col = "#ff4d4f" if radar["master_state"] == "RED_LOCKED" else ("#fbbf24" if radar["master_state"] == "YELLOW" else "#00e676")
     return clean_html(f"""
@@ -474,7 +508,7 @@ def build_forecast_responsive_cards_html(forecast: dict) -> str:
 build_forecast_mobile_cards_html = build_forecast_responsive_cards_html
 
 # ==========================================
-# 4. 盤面族群格式化 ＋ 8 大【先結論、後數據、附數字含意】面板（修正面板 5 夜盤備援 ＋ 面板 7 大跌防誤判）
+# 4. 盤面族群格式化 ＋ 8 大【先結論、後數據、附數字含意】面板（v64.2 盤中廣度防呆 ＋ 舊夜盤隔離）
 # ==========================================
 def compute_tw_hot_sectors(records: list[dict]) -> dict:
     if not records:
@@ -517,18 +551,35 @@ def build_8_indicator_panels_html(
     tsm_c = "#ff4d4f" if tsm_chg >= 0 else "#00e676"
     nvda_c = "#ff4d4f" if nvda_chg >= 0 else "#00e676"
 
-    # 1. 台股廣度與熱門族群
+    # 1. 台股廣度與熱門族群（v64.2 盤中廣度防呆：盤中改用核心權值即時溫度計，不拿前日崩盤當今日恐慌）
     adv_r = breadth["adv_ratio_pct"]
-    c1_concl = "🚀 全面普漲／廣度推力爆發" if (adv_r >= 85 or sb_limit_up >= 100) else ("🟢 多方家數佔優" if adv_r >= 55 else ("🚨 空方恐慌普跌" if adv_r <= 25 else "⚖️ 盤面分化震盪"))
-    if scan_data:
-        c1_body = f"• <b>全市場廣度（{breadth['src']}）</b>：上漲 <b>{breadth['up_cnt']:,}</b> ／ 下跌 <b>{breadth['dn_cnt']:,}</b>（上漲比 <b>{adv_r:.1f}%</b>｜漲停 <b>{sb_limit_up}</b> ／ 跌停 <b>{sb_limit_dn}</b>）<br>{tw_hot_sec_info['hot_html']}{tw_hot_sec_info['cold_html']}"
+    is_br_stale = bool(breadth.get("is_stale_intraday", False))
+    core_up, core_dn, core_adv = breadth.get("core_rt_up", 0), breadth.get("core_rt_dn", 0), breadth.get("core_rt_adv_pct", 50.0)
+
+    if is_br_stale:
+        if core_adv >= 70 or fleet["twii_chg_pct"] >= 1.5:
+            c1_concl = f"🟢 盤中權值反彈偏多（核心權值上漲比 {core_adv:.0f}%・待 14:30 全市場結算）"
+        elif core_adv <= 30 or fleet["twii_chg_pct"] <= -1.5:
+            c1_concl = f"🔴 盤中權值承壓偏弱（核心權值上漲比 {core_adv:.0f}%・待 14:30 全市場結算）"
+        else:
+            c1_concl = f"⚖️ 盤中權值震盪換手（核心權值上漲比 {core_adv:.0f}%・待 14:30 全市場結算）"
+        rt_core_line = f"• <b>⚡ 盤中核心權值即時溫度計</b>：上漲 <b style='color:#ff8a80;'>{core_up} 檔</b> ／ 下跌 <b style='color:#69f0ae;'>{core_dn} 檔</b>（權值上漲比 <b>{core_adv:.1f}%</b>）<br>"
+        stale_note_line = f"• <span style='color:#94a3b8;'>⏳ {breadth['src']}：上漲 {breadth['up_cnt']:,} ／ 下跌 {breadth['dn_cnt']:,} (漲停 {sb_limit_up} ／ 跌停 {sb_limit_dn}，僅供昨日參考)</span><br>"
+        if scan_data:
+            c1_body = f"{rt_core_line}{stale_note_line}{tw_hot_sec_info['hot_html']}{tw_hot_sec_info['cold_html']}"
+        else:
+            c1_body = f"{rt_core_line}{stale_note_line}• 💡 點擊頂部【🚀 啟動全台個股池 (Layer 2)】即可展開盤中 15 大即時爆量族群領頭羊。"
     else:
-        c1_body = (
-            f"• <b>全市場廣度（{breadth['src']}）</b>：上漲 <b style='color:#ff8a80;'>{breadth['up_cnt']:,} 家</b> ／ 下跌 <b style='color:#69f0ae;'>{breadth['dn_cnt']:,} 家</b>（上漲比 <b>{adv_r:.1f}%</b>）<br>"
-            f"• <b>極端鎖死家數</b>：漲停 <b style='color:#ff8a80;'>{sb_limit_up} 家</b> ／ 跌停 <b style='color:#69f0ae;'>{sb_limit_dn} 家</b><br>"
-            f"• 💡 點擊頂部【🚀 啟動全台個股池 (Layer 2)】即可展開 15 大熱門爆量族群領頭羊。"
-        )
-    c1_meaning = "📖 數字含意：上漲比 ≧85% 或漲停 ≧100家 觸發『2025/04 廣度推力豁免』（無量鎖漲停亦判反轉）；跌停由破百縮至 &lt;20家 代表恐慌殺盤結束。"
+        c1_concl = "🚀 全面普漲／廣度推力爆發" if (adv_r >= 85 or sb_limit_up >= 100) else ("🟢 多方家數佔優" if adv_r >= 55 else ("🚨 空方恐慌普跌" if adv_r <= 25 else "⚖️ 盤面分化震盪"))
+        if scan_data:
+            c1_body = f"• <b>全市場廣度（{breadth['src']}）</b>：上漲 <b>{breadth['up_cnt']:,}</b> ／ 下跌 <b>{breadth['dn_cnt']:,}</b>（上漲比 <b>{adv_r:.1f}%</b>｜漲停 <b>{sb_limit_up}</b> ／ 跌停 <b>{sb_limit_dn}</b>）<br>{tw_hot_sec_info['hot_html']}{tw_hot_sec_info['cold_html']}"
+        else:
+            c1_body = (
+                f"• <b>全市場廣度（{breadth['src']}）</b>：上漲 <b style='color:#ff8a80;'>{breadth['up_cnt']:,} 家</b> ／ 下跌 <b style='color:#69f0ae;'>{breadth['dn_cnt']:,} 家</b>（上漲比 <b>{adv_r:.1f}%</b>）<br>"
+                f"• <b>極端鎖死家數</b>：漲停 <b style='color:#ff8a80;'>{sb_limit_up} 家</b> ／ 跌停 <b style='color:#69f0ae;'>{sb_limit_dn} 家</b><br>"
+                f"• 💡 點擊頂部【🚀 啟動全台個股池 (Layer 2)】即可展開 15 大熱門爆量族群領頭羊。"
+            )
+    c1_meaning = "📖 數字含意：證交所全市場漲跌家數於 14:30 後結算，盤中改以核心權值即時漲跌比反映真實溫度；收盤上漲比 ≧85% 或漲停 ≧100家 觸發『2025/04 廣度推力豁免』。"
 
     # 2. 美股 VIX / 費半 / ADR
     c2_concl = "🚨 恐慌爆表（VIX ≧ 30）" if vix_now >= 30 else ("🔥 半導體強彈修復" if sox_chg >= 2.0 else ("⚠️ 避險情緒偏高（VIX 20~29）" if vix_now >= 20 else "☀️ 美股風險偏好穩健"))
@@ -555,15 +606,18 @@ def build_8_indicator_panels_html(
     )
     c3_meaning = "📖 數字含意：&gt;60分 屬散戶認輸斷頭區（反指標易出波段強彈）；35~55分 為平衡選股區；&lt;28分 代表散戶瘋狂追價須防隨時修正。"
 
-    # 4. 融資維持率與大盤融資曲線
-    c4_concl = "💎 進入真斷頭清洗區（維持率 ≦150% 或 融資減幅追上大盤）" if (sb_maint <= 150 or sb_margin_dd >= fleet["twii_30d_dd_pct"]) else ("🟡 融資去槓桿進行中" if sb_margin_2d < 0 else "⚠️ 融資回流、籌碼仍待沉澱")
+    # 4. 融資維持率與大盤融資曲線（補齊 30日融資減幅 vs 大盤跌幅 達標標註）
+    m_flush_ok = (sb_margin_dd >= fleet["twii_30d_dd_pct"])
+    c4_concl = "💎 籌碼清洗達標（30日融資減幅 ≧ 大盤跌幅 或 維持率 ≦150%）" if (sb_maint <= 150 or m_flush_ok) else ("🟡 融資去槓桿進行中" if sb_margin_2d < 0 else "⚠️ 融資回流、籌碼仍待沉澱")
+    flush_badge = f"<span style='color:#00e676; font-weight:800;'>（已超越大盤回檔 -{fleet['twii_30d_dd_pct']:.1f}% ✅）</span>" if m_flush_ok else f"（尚未追上大盤回檔 -{fleet['twii_30d_dd_pct']:.1f}%）"
     c4_body = (
         f"• <b>線性校準維持率</b>：<b style='color:#ffd54f; font-size:16px;'>{sb_maint:.1f}%</b>（{deriv['margin_src']}）<br>"
-        f"• <b>上市融資餘額</b>：最新 <b>{deriv['margin_balance_yi']:,.1f} 億</b>（單日 <b>{deriv['margin_chg_yi']:+.1f}億</b> ｜ 近2日 <b>{sb_margin_2d:+.1f}億 / {sb_margin_2d_pct:+.1f}%</b> ｜ 30日減幅 <b>-{sb_margin_dd:.1f}%</b>）"
+        f"• <b>上市融資餘額</b>：最新 <b>{deriv['margin_balance_yi']:,.1f} 億</b>（單日 <b>{deriv['margin_chg_yi']:+.1f}億</b> ｜ 近2日 <b>{sb_margin_2d:+.1f}億 / {sb_margin_2d_pct:+.1f}%</b>）<br>"
+        f"• <b>30日波段減幅</b>：<b>-{sb_margin_dd:.1f}%</b> {flush_badge}"
     )
-    c4_meaning = "📖 數字含意：整戶維持率跌破 150%（純上市破 135%~145%）會強制引發券商追繳斷頭；當『30日融資減幅% ≧ 大盤跌幅%』代表散戶槓桿徹底洗淨。"
+    c4_meaning = "📖 數字含意：整戶維持率跌破 150% 會引發券商強制追繳；即使維持率反彈回 160%，只要『30日融資減幅% ≧ 大盤跌幅%』代表散戶高檔槓桿已實質洗淨。"
 
-    # 5. 大小台期貨動向（含 v64.1 三層夜盤備援）＆外資佈空成本
+    # 5. 大小台期貨動向（含 FinMind MTX 小台散戶 ＋ 舊夜盤隔離）＆外資佈空成本
     if sb_fini_oi < -80000: c5_concl = f"🚨 外資極限重空 ({sb_fini_oi:+,}口・空單大於8萬口壓制)"
     elif sb_fini_oi < -60000: c5_concl = f"🔴 外資股災避險空單 ({sb_fini_oi:+,}口)"
     elif sb_fini_oi < -40000: c5_concl = f"🟡 外資警戒避險偏空 ({sb_fini_oi:+,}口)"
@@ -576,7 +630,7 @@ def build_8_indicator_panels_html(
         f"• <b>實質對沖與小台散戶</b>：外資+投信實質淨額 <b>{deriv['real_fini_oi']:+,}口</b> ｜ 小台散戶 <b>{deriv['retail_mtx_oi']:+,}口</b>(日{deriv['retail_mtx_chg']:+,}) ｜ 價差：{b_txt}{night_line}<br>"
         f"• <b>外資佈空成本推估</b>：均價約 <b>{deriv['est_short_cost']:,.0f}點</b>（獲利 {deriv['short_profit_pts']:+,.0f}點）｜ 連補 <b>{sb_consec_cover}日</b> / 3日累計 <b>{sb_cover_3d:+,}口</b>"
     )
-    c5_meaning = "📖 數字含意：外資大台淨空單 &gt;4萬警戒、&gt;6萬股災、&gt;8萬極限對沖；『ΔOI含夜盤』與『日盤交易』常因夜盤回補而不同；🌙夜盤直接領先預告 09:00 開盤跳空點位。"
+    c5_meaning = "📖 數字含意：外資大台淨空單 &gt;4萬警戒、&gt;6萬股災、&gt;8萬極限對沖；『ΔOI含夜盤』與『日盤交易』常因夜盤回補而不同；小台散戶為負代表散戶看空反指標偏多。"
 
     # 6. 選擇權 PCR ＋ 大盤三大法人現貨 Sum-Check ＆ 權證避險
     pcr_v, wh_v = deriv["pc_ratio"], deriv["warrant_hedge_yi"]
@@ -593,7 +647,7 @@ def build_8_indicator_panels_html(
     c6_body = f"• <b>全月份選擇權 P/C Ratio</b>：<b style='color:#ffd54f; font-size:16px;'>{pcr_v:.1f}%</b><br>{spot_html}"
     c6_meaning = "📖 數字含意：PCR &lt;80%代表莊家大賣買權壓天花板（偏空）、&gt;120%下檔鐵板強；限空令期間須靠『外資現貨轉連買＋期貨空單連補＋台幣止貶』三者共振確認真回流。"
 
-    # 7. 60分K微觀扳機 ＆ 日KDJ動能空間（v64.1 修正：重挫日 <= -2% 或 60分J下彎嚴禁誤判綠燈！）
+    # 7. 60分K微觀扳機 ＆ 日KDJ動能空間（重挫防誤判）
     near_60_ma5 = (fleet["twii_now"] >= fleet["k60_ma5"] * 0.997)
     above_day_ma5 = (fleet["twii_now"] >= fleet["ma5"])
     above_60_ma20 = (fleet["twii_now"] >= fleet["k60_ma20"])
@@ -610,10 +664,7 @@ def build_8_indicator_panels_html(
         else:
             c7_concl = "🟢 60分K與日5MA同步站穩（短線右側止跌訊號亮起）"
     elif above_day_ma5 and above_60_ma20:
-        if is_heavy_drop or k60_j_falling:
-            c7_concl = "🟡 急殺震盪回測均線（60分K動能偏弱，防續測支撐）"
-        else:
-            c7_concl = "🟢 穩守日5MA與60分20MA（高檔換手整理中）"
+        c7_concl = "🟡 急殺震盪回測均線（60分K動能偏弱，防續測支撐）" if (is_heavy_drop or k60_j_falling) else "🟢 穩守日5MA與60分20MA（高檔換手整理中）"
     elif near_60_ma5 or above_60_ma20:
         c7_concl = "🟡 60分K反彈測試中（尚未站回日5MA）"
     else:
@@ -659,7 +710,7 @@ def build_8_indicator_panels_html(
     """)
 
 # ==========================================
-# 5. 淘金客 v24.4 雙模式戰情數據包組裝器
+# 5. 淘金客 v24.4 雙模式戰情數據包組裝器（過濾已反映舊夜盤，避免 AI 誤判）
 # ==========================================
 def build_market_outpost_line_v244(fleet: dict, radar: dict, deriv: dict, forecast: dict, tnx_val: float, fx_now: float, ban_active: bool, next_ev: dict, us_data: dict = None) -> str:
     tw = fleet["twii_now"]
@@ -670,8 +721,12 @@ def build_market_outpost_line_v244(fleet: dict, radar: dict, deriv: dict, foreca
     pre_tag = f" | {radar['precursor_txt']}" if radar.get("precursor_txt") else ""
     ev_tag = f"近3日事件:{next_ev['日期']}{next_ev['_short']}(倒數{next_ev['_days']}天)" if (next_ev and next_ev["_days"] <= 3) else (f"下個事件:{next_ev['日期']}{next_ev['_short']}" if next_ev else "無近事件")
     pr = forecast["probs"]
-    n_lbl = "即時夜盤TXF" if deriv.get("night_is_live_mis") else f"夜盤結算({deriv.get('night_tx_time', '')})"
-    night_tag = f" | {n_lbl}={deriv['night_tx_close']:,.0f}({deriv['night_tx_chg']:+,.0f}/{deriv['night_tx_chg_pct']:+.2f}%)" if deriv.get("night_valid") else ""
+
+    if deriv.get("night_valid") and (not deriv.get("night_is_stale", False)):
+        n_lbl = "即時夜盤TXF" if deriv.get("night_is_live_mis") else f"今晨夜盤({deriv.get('night_tx_time', '')})"
+        night_tag = f" | {n_lbl}={deriv['night_tx_close']:,.0f}({deriv['night_tx_chg']:+,.0f}/{deriv['night_tx_chg_pct']:+.2f}%)"
+    else:
+        night_tag = ""
     nq_tag = f" | NQ那指期={us_data['nq_chg']:+.2f}%" if (us_data and not deriv.get("night_is_live_mis")) else ""
     spot_tag = f" | 現貨Sum-Check:外{deriv['spot_fini_yi']:+.1f}/投{deriv['spot_sitc_yi']:+.1f}/自營{deriv['spot_dealer_self_yi']+deriv['warrant_hedge_yi']:+.1f}=合計{deriv['spot_total_yi']:+.1f}億(外資連{deriv['spot_fini_consec']:+d}日)" if deriv.get("spot_valid") else ""
     cs_tag = f" | {us_data['credit_spread_str']}" if (us_data and us_data.get("credit_spread_str")) else ""
@@ -680,7 +735,7 @@ def build_market_outpost_line_v244(fleet: dict, radar: dict, deriv: dict, foreca
         f"位階:{pos_60}60MA({fleet['ma60']:,.0f})/{pos_120}120MA({fleet['ma120']:,.0f})/{pos_240}240MA({fleet['ma240']:,.0f})/月20MA({fleet['m_ma20']:,.0f}) | "
         f"模組0燈號:{radar['lamp_short']}(預警{radar['w_count']}/5・落底{radar['b_count']}/5・{b2_tag}{esc_tag}){pre_tag} | "
         f"預測機率:基準{pr['base']}%/樂觀{pr['bull']}%/保守{pr['bear']}% | "
-        f"大台外資OI={deriv['fini_tx_oi']:+,}(ΔOI{deriv['fini_tx_oi_delta']:+,}){spot_tag} | {ban_tag} | PCR={deriv['pc_ratio']:.1f}% | ^TNX={tnx_val:.2f}%{cs_tag} | TWD={fx_now:.3f} | {ev_tag}"
+        f"大台外資OI={deriv['fini_tx_oi']:+,}(ΔOI{deriv['fini_tx_oi_delta']:+,})/小台散戶={deriv['retail_mtx_oi']:+,}{spot_tag} | {ban_tag} | PCR={deriv['pc_ratio']:.1f}% | ^TNX={tnx_val:.2f}%{cs_tag} | TWD={fx_now:.3f} | {ev_tag}"
     )
 
 def _format_tdcc(d_rec: dict, live_tdcc_map: dict) -> str:
