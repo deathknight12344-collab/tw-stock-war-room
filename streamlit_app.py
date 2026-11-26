@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime, os, json, time, re, importlib
 
-st.set_page_config(page_title="台股每日戰情室 v64.2", page_icon="🚨", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="台股每日戰情室 v65.0", page_icon="🚨", layout="wide", initial_sidebar_state="auto")
 
 st.markdown("""
 <style>
@@ -45,7 +45,7 @@ div[data-testid="stMarkdownContainer"] { overflow-wrap: anywhere; word-break: br
 </style>
 """, unsafe_allow_html=True)
 
-# 副程式自動重載防呆（偵測檔案修改時間，有異動才重載一次，不影響快取速度）
+# 副程式檔案修改時間自動重載防呆（免手動 Reboot 即可同步載入新版 data_engine / charts_ui）
 import config_events, data_engine, charts_ui
 _need_reload = False
 for _m in (config_events, data_engine, charts_ui):
@@ -67,7 +67,8 @@ from data_engine import (
     fetch_dynamic_msci_data, fetch_mis_realtime_core16, fetch_market_prices_fast,
     fetch_us_sectors_and_leaders, fetch_auto_derivatives_and_margin_v63,
     compute_dynamic_market_forecast, fetch_and_analyze_fleet_fast,
-    fetch_tdcc_weekly_delta_ondemand, fetch_pair_swap_history,
+    fetch_tdcc_weekly_delta_ondemand, fetch_stock_margin_short_sbl_batch,
+    fetch_ondemand_stocks_detail, fetch_pair_swap_history,
     scan_all_stocks_on_demand, fetch_all_monthly_revenue_df_on_demand, verify_24m_first_breakout_batch
 )
 from charts_ui import (
@@ -76,7 +77,7 @@ from charts_ui import (
     build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
     build_forecast_responsive_cards_html, compute_tw_hot_sectors,
     build_8_indicator_panels_html, build_market_outpost_line_v244,
-    build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
+    build_market_panorama_package_v244, build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
 )
 
 ZOOM_OPT_MAP = {"自適應 (預設)": "auto", "🔍 1.5x 放大": "1.5x", "🔎 2.0x 超大": "2.0x"}
@@ -95,6 +96,7 @@ DEFAULT_PORTFOLIO_STATE = {
     "fish_3711_price": 450.0,
     "lots_00400a": 5.0,
     "cost_00400a": 11.89,
+    "target_00400a_low": 0.0,
     "lots_6239": 0.0,
     "lots_3264": 0.0,
     "twd_cash_wan": 44.8,
@@ -128,7 +130,7 @@ pf_saved = load_portfolio_state()
 # ==========================================
 now_tw_dt = get_tw_now()
 now_str = now_tw_dt.strftime("%Y-%m-%d %H:%M:%S")
-st.markdown("## 🚨 台股每日戰情室 v64.2 (盤中廣度防呆＋11/26最新持股與存檔＋夜盤三層備援＋淘金客 v24.4)")
+st.markdown("## 🚨 台股每日戰情室 v65.0 (三軌戰情包＋大盤8指標全景＋1~5檔PK＆資券借＋淘金客 v24.4)")
 
 btn_c1, btn_c2, btn_c3, btn_c4 = st.columns([1.8, 2.0, 1.5, 1.7])
 if btn_c1.button("⚡ 秒速刷新大盤與四水庫 (2秒)", use_container_width=True):
@@ -142,14 +144,14 @@ trigger_layer2_top = btn_c2.button("🚀 啟動／重掃全台個股池 (Layer 2
 
 if btn_c3.button("🔄 全域清快取重抓", use_container_width=True):
     st.cache_data.clear()
-    for k_pop in ["v64_scan_data", "v64_rev_df", "v63_scan_data", "v63_rev_df", "mode_b_pkg_txt", "ver_24m_map"]:
+    for k_pop in ["v65_scan_data", "v65_rev_df", "v64_scan_data", "v64_rev_df", "mode_a_manual_txt", "mode_b_pkg_txt", "ver_24m_map"]:
         st.session_state.pop(k_pop, None)
     st.rerun()
 
 auto_refresh = btn_c4.checkbox("⏱️ 每 20 秒自動刷新大盤", value=False)
 
 # ================= LAYER 1：秒開大盤與個人核心資產 (3～5 秒) =================
-with st.spinner("⚡ Layer 1 秒開載入中：大盤三源最新日、大小台法人(含MTX)、夜盤備援、信用利差與四水庫..."):
+with st.spinner("⚡ Layer 1 秒開載入中：大盤三源最新日、外資20日連買賣、類股結構/OTC、夜盤擇優與四水庫..."):
     fleet = fetch_and_analyze_fleet_fast()
     us_data = fetch_us_sectors_and_leaders()
 
@@ -171,13 +173,13 @@ fx_stopped_dep = bool(fx_chg_ntd <= 0.0)
 macro_withdrawal_alert = bool((tnx_val >= 5.0 or us_data.get("credit_spread_alert", False)) and fx_now >= 32.50)
 
 def _run_layer2_scan():
-    with st.spinner("🔍 Layer 2 執行中：掃描全台 ~170 檔非殭屍股 K 線、20MA扣抵、雙市處置/注意/除權息、個股Sum-Check與穀倉..."):
-        st.session_state["v64_scan_data"] = scan_all_stocks_on_demand(fleet["twii_20d_ret"], macro_withdrawal_alert)
+    with st.spinner("🔍 Layer 2 執行中：掃描全台 ~170 檔非殭屍股 K 線、週10/月5MA、20MA扣抵、真實當沖率、處置/注意/除權息與穀倉..."):
+        st.session_state["v65_scan_data"] = scan_all_stocks_on_demand(fleet["twii_20d_ret"], macro_withdrawal_alert)
 
 if trigger_layer2_top:
     _run_layer2_scan()
 
-scan_data = st.session_state.get("v64_scan_data", None)
+scan_data = st.session_state.get("v65_scan_data", None)
 price_dict_active = scan_data["price_dict"] if scan_data else fast_prices
 all_scanned_details = scan_data["all_details"] if scan_data else {}
 msci_data = scan_data["msci_data"] if scan_data else fetch_dynamic_msci_data(1)
@@ -216,6 +218,7 @@ with st.sidebar:
     sb_fish_3711 = st.number_input("日月光低接釣魚目標價 (元・禁追500+)", value=float(pf_saved["fish_3711_price"]), min_value=100.0, step=5.0, format="%.1f")
     sb_lots_00400a = st.number_input("待清零收尾：00400A 張數 (均價11.89)", value=float(pf_saved["lots_00400a"]), min_value=0.0, step=1.0, format="%.1f")
     sb_cost_00400a = st.number_input("00400A 成交均價 (元)", value=float(pf_saved["cost_00400a"]), min_value=0.0, step=0.1, format="%.2f")
+    sb_target_00400a = st.number_input("00400A 自訂掛賣下緣價 (0=自動浮動)", value=float(pf_saved.get("target_00400a_low", 0.0)), min_value=0.0, step=0.05, format="%.2f")
     sb_lots_6239 = st.number_input("衛星剩餘：力成(6239) 張數 (已出清)", value=float(pf_saved["lots_6239"]), min_value=0.0, step=0.1, format="%.1f")
     sb_lots_3264 = st.number_input("衛星剩餘：欣銓(3264) 張數 (已出清)", value=float(pf_saved["lots_3264"]), min_value=0.0, step=0.1, format="%.1f")
     sb_twd_cash_wan = st.number_input("水庫四：純台幣現金 (萬元)", value=float(pf_saved["twd_cash_wan"]), min_value=0.0, step=1.0, format="%.1f")
@@ -227,7 +230,7 @@ with st.sidebar:
             "lots_00985b": sb_lots_00985b, "cost_00985b": sb_cost_00985b, "lots_00713": sb_lots_00713,
             "shares_3711_short": sb_shares_3711_short, "short_3711_be": sb_short_3711_be,
             "short_3711_above_ma5": sb_short_3711_above_ma5, "fish_3711_price": sb_fish_3711,
-            "lots_00400a": sb_lots_00400a, "cost_00400a": sb_cost_00400a,
+            "lots_00400a": sb_lots_00400a, "cost_00400a": sb_cost_00400a, "target_00400a_low": sb_target_00400a,
             "lots_6239": sb_lots_6239, "lots_3264": sb_lots_3264,
             "twd_cash_wan": sb_twd_cash_wan, "usd_cash": sb_usd_cash
         })
@@ -288,6 +291,9 @@ if not deriv.get("basis_valid", False) and abs(sb_basis) > 0.1:
 
 days_since_ban = (now_tw_dt.date() - sb_ban_date).days
 is_br_stale = bool(breadth.get("is_stale_intraday", False))
+target_400a_arg = sb_target_00400a if sb_target_00400a > 0 else None
+eff_t1_400 = sb_target_00400a if sb_target_00400a > 0 else etf_m["00400A"]["exit_t1"]
+eff_t2_400 = max(eff_t1_400 + 0.30, etf_m["00400A"]["exit_t2"])
 
 radar = evaluate_crash_and_bottom_radar_v244(
     fleet["twii_now"], fleet["twii_chg_pct"], fleet["ma60"], fleet["ma120"], fleet["ma240"], fleet["twii_30d_dd_pct"], fleet["sp500_below_ma200"],
@@ -299,18 +305,19 @@ radar = evaluate_crash_and_bottom_radar_v244(
     breadth_is_stale=is_br_stale
 )
 forecast = compute_dynamic_market_forecast(
-    fleet, radar, vix_now, sox_chg, upcoming_ev_rows, sb_fini_oi, deriv["fini_tx_oi_delta"], lots_00400a=sb_lots_00400a
+    fleet, radar, vix_now, sox_chg, upcoming_ev_rows, sb_fini_oi, deriv["fini_tx_oi_delta"],
+    lots_00400a=sb_lots_00400a, target_00400a_low=target_400a_arg
 )
 
 t_min_now = now_tw_dt.hour * 60 + now_tw_dt.minute
 
-# 四水庫即時價格與資產市值試算（完全對齊 2026/11/26 玉山證券真實股數）
+# 四水庫即時價格與資產市值試算
 def get_live_p(code_k, default_v):
     is_open_t = (now_tw_dt.weekday() < 5) and (t_min_now >= 540)
     rt_v = rt_quotes.get(code_k, {}).get("close", 0.0) if is_open_t else 0.0
     return float(rt_v or price_dict_active.get(code_k, {}).get("close") or default_v)
 
-p_2330, p_3711 = get_live_p("2330", 2150.0), get_live_p("3711", 499.0)
+p_2330, p_3711 = get_live_p("2330", 2150.0), get_live_p("3711", 511.0)
 p_6239, p_3264 = get_live_p("6239", 191.0), get_live_p("3264", 141.5)
 p_2884, p_2881 = get_live_p("2884", 39.1), get_live_p("2881", 134.0)
 p_2812, p_2887, p_2834 = get_live_p("2812", 16.15), get_live_p("2887", 34.35), get_live_p("2834", 16.35)
@@ -318,7 +325,7 @@ p_avgo = us_data["quotes"].get("AVGO", {}).get("close") or etf_m["AVGO"]["p"]
 p_nvda = us_data["quotes"].get("NVDA", {}).get("close") or etf_m["NVDA"]["p"]
 p_sgov = us_data["quotes"].get("SGOV", {}).get("close") or etf_m["SGOV"]["p"]
 p_00400a, p_00985b, p_00713 = etf_m["00400A"]["p"], etf_m["00985B"]["p"], etf_m["00713"]["p"]
-ma5_3711 = etf_m.get("3711", {}).get("ma5", 492.0)
+ma5_3711 = etf_m.get("3711", {}).get("ma5", 493.6)
 
 val_r1 = 400000.0
 val_r2_tw_semi = 4000 * p_2330 + 3000 * p_3711
@@ -334,6 +341,15 @@ total_assets = val_r1 + val_r2 + val_r3 + val_r4 + val_short_3711 + val_sat_semi
 semi_total = val_r2_tw_semi + val_r2_us_semi + val_short_3711 + val_sat_semi
 semi_ratio_pct = round((semi_total / max(1.0, total_assets)) * 100.0, 1)
 
+portfolio_summary_obj = {
+    "total_wan": total_assets / 10000.0, "semi_pct": semi_ratio_pct,
+    "lots_00985b": sb_lots_00985b, "cost_00985b": sb_cost_00985b, "lots_00713": sb_lots_00713, "r3_wan": val_r3 / 10000.0,
+    "twd_cash_wan": sb_twd_cash_wan, "usd_cash": sb_usd_cash, "r4_wan": val_r4 / 10000.0,
+    "lots_00400a": sb_lots_00400a, "cost_00400a": sb_cost_00400a, "t1_400": eff_t1_400, "t2_400": eff_t2_400,
+    "shares_3711_short": sb_shares_3711_short, "p_3711": p_3711, "ma5_3711": ma5_3711,
+    "be_3711": sb_short_3711_be, "fish_3711": sb_fish_3711
+}
+
 holding_notes_map = {
     "3711": f"【雙軌分帳】(1)水庫二傳家寶底倉 3張(@172.67)不動；(2)11/23淨降倉換強獨立短單 {sb_shares_3711_short}股(@474.0/平衡價{sb_short_3711_be:.2f}/5MA={ma5_3711:.1f})；(3)紀律鎖定：嚴禁500元以上追高，低接釣魚鎖定 {sb_fish_3711:.0f} 元區間！",
     "6239": f"已全數出清 ({sb_lots_6239:.1f}張)，資金已併入水庫四純現金",
@@ -344,7 +360,7 @@ holding_notes_map = {
     "2812": "水庫二傳家寶核心底倉 27.148張 (@7.83)",
     "2887": "水庫二傳家寶核心底倉 4.882張 (@9.97)",
     "2834": "水庫二傳家寶核心底倉 1.090張 (@8.67)",
-    "00400A": f"最後收尾剩餘 {sb_lots_00400a:.0f}張 (@{sb_cost_00400a:.2f}，11/26已賣15張轉債，不加碼逢彈清零)" if sb_lots_00400a > 0 else "已全數清零退場轉入 00985B",
+    "00400A": f"最後收尾剩餘 {sb_lots_00400a:.0f}張 (@{sb_cost_00400a:.2f}，逢彈 {eff_t1_400:.2f}~{eff_t2_400:.2f} 清零轉 00985B)" if sb_lots_00400a > 0 else "已全數清零退場轉入 00985B",
     "00985B": f"水庫三核心低波短債 {sb_lots_00985b:.1f}張 (@{sb_cost_00985b:.2f}，第二道現金流持續累積)"
 }
 
@@ -372,20 +388,20 @@ else:
 # 六大功能分頁架構
 # ==========================================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🚨 總結＆雷達＆預測",
+    "🚨 總結＆雷達＆戰情包",
     "⚖️ 換股＆短單＆四水庫",
     f"⚡ 短線旱地拔蔥榜 {'✅' if scan_data else '💤'}",
     f"🏛️ 長線波段＆MSCI池 {'✅' if scan_data else '💤'}",
     f"🌾 穀倉與防墊料專區 {'✅' if scan_data else '💤'}",
-    f"📈 上市櫃月營收快篩 {'✅' if 'v64_rev_df' in st.session_state else '💤'}"
+    f"📈 上市櫃月營收快篩 {'✅' if 'v65_rev_df' in st.session_state else '💤'}"
 ])
 
 # ==================== TAB 1 ====================
 with tab1:
-    # 1. 盤中模組 9 全時段時間軸防呆條 ＋ 🌙 台指期夜盤即時預警
-    st.markdown(build_intraday_timeline_banner_html(now_tw_dt, radar["master_state"], deriv_eff, next_ev), unsafe_allow_html=True)
+    # 1. 盤中模組 9 全時段時間軸防呆條 ＋ 🌙 夜盤預警 ＋ 🇺🇸 美股休市偵測
+    st.markdown(build_intraday_timeline_banner_html(now_tw_dt, radar["master_state"], deriv_eff, next_ev, us_data=us_data), unsafe_allow_html=True)
 
-    # 2. 加權指數 ＋ 模組 0 雙雷達主卡片（盤中廣度防呆：未結算顯示核心權值即時溫度）
+    # 2. 加權指數 ＋ 模組 0 雙雷達主卡片
     hero_cls = "war-hero-box-danger" if radar["master_state"] == "RED_LOCKED" else ("war-hero-box-warn" if radar["master_state"] == "YELLOW" else "war-hero-box")
     idx_col = "#ff4d4f" if fleet["twii_chg_pct"] >= 0 else "#00e676"
     w_html = "<br>".join([f"{'🔴' if f else '⚪'} {txt}" for f, txt in radar["w_items"]])
@@ -394,10 +410,12 @@ with tab1:
         b_html += f"<br><span style='color:#fde047; font-weight:800;'>{radar['precursor_txt']}</span>"
     ban_badge = "🛡️ <b>限空令生效中</b>（凍結借券賣減看多加分，改看外資現貨＋期貨ΔOI連補＋台幣止貶）" if sb_ban_active else "⚪ 目前無限空令"
 
+    sec_s = fleet.get("sector_struct", {})
+    otc_tag_hero = f" ｜ 櫃買OTC：<b>{sec_s['otc_chg']:+.2f}%</b>（{sec_s['tag']}）" if sec_s.get("otc_chg") is not None else ""
     if is_br_stale:
-        breadth_hero_str = f"⚡ 盤中核心權值溫度：<b>上漲比 {breadth.get('core_rt_adv_pct', 50):.0f}%（{breadth.get('core_rt_up', 0)}漲 / {breadth.get('core_rt_dn', 0)}跌）</b>｜ <i>全市場家數待 14:30 結算</i>"
+        breadth_hero_str = f"⚡ 盤中核心權值溫度：<b>上漲比 {breadth.get('core_rt_adv_pct', 50):.0f}%（{breadth.get('core_rt_up', 0)}漲 / {breadth.get('core_rt_dn', 0)}跌）</b>{otc_tag_hero}"
     else:
-        breadth_hero_str = f"市場廣度（{breadth['src']}）：<b>上漲比 {breadth['adv_ratio_pct']:.0f}%（漲停 {sb_limit_up} 家 ／ 跌停 {sb_limit_dn} 家）</b>"
+        breadth_hero_str = f"市場廣度（{breadth['src']}）：<b>上漲比 {breadth['adv_ratio_pct']:.0f}%（漲停 {sb_limit_up} ／ 跌停 {sb_limit_dn}）</b>{otc_tag_hero}"
 
     st.markdown(clean_html(f"""
     <div class="{hero_cls}">
@@ -423,26 +441,67 @@ with tab1:
     </div>
     """), unsafe_allow_html=True)
 
-    # 3. 還原升級：【📋 當日戰情總結 ＆ 未來 3 日多空推演卡】（同步 11/26 最新持股與鎖定紀律）
+    # 3. 當日戰情總結 ＆ 未來 3 日多空推演卡
     st.markdown(build_daily_summary_and_3day_card_html(
         fleet, radar, deriv_eff, us_data, forecast, next_ev,
         p_3711, ma5_3711, sb_short_3711_be, sb_shares_3711_short, etf_m,
         lots_00400a=sb_lots_00400a, lots_00985b=sb_lots_00985b,
-        twd_cash_wan=sb_twd_cash_wan, fish_price_3711=sb_fish_3711
+        twd_cash_wan=sb_twd_cash_wan, fish_price_3711=sb_fish_3711,
+        target_00400a_low=target_400a_arg
     ), unsafe_allow_html=True)
 
-    # 4. 雙模式戰情數據包匯出中心 (對接淘金客 v24.4)
-    st.markdown("### 🤖 【淘金客 v24.4 雙腦互補：一鍵複製戰情數據包匯出中心】（防截斷核對 ＋ 右上角一鍵複製）")
-    pkg_tab_a, pkg_tab_b = st.tabs(["🛡️ 按鈕 A：守門員快篩批次包（自動切批 5～6 檔）", "🔬 按鈕 B：決選深檢戰情包（1～3 檔＋持倉分帳＋季報防墊料）"])
+    # 4. v65.0 三軌戰情數據包匯出中心（按鈕 0 大盤全景 ＋ 按鈕 A 跨榜海選 ＋ 按鈕 B 1~5 檔 PK 比賽）
+    st.markdown("### 🤖 【淘金客 v24.4 三軌戰情數據包匯出中心】（防截斷核對 ＋ 右上角一鍵複製）")
+    pkg_tab_0, pkg_tab_a, pkg_tab_b = st.tabs([
+        "🌍 按鈕 0：大盤全景多空＆四水庫包（含 8 大指標）",
+        "🛡️ 按鈕 A：初篩海選／守門員快篩（跨榜或手動 5～6 檔）",
+        "🏆 按鈕 B：決選 PK 比賽深檢（1～5 檔＋橫向 PK 表＋資券借＋週月線）"
+    ])
 
+    # ---- 按鈕 0：大盤全景多空包 (Layer 1 秒出，免等掃描) ----
+    with pkg_tab_0:
+        p0_c1, p0_c2 = st.columns([2.2, 3.8])
+        inc_pf_0 = p0_c1.checkbox("💧 附帶個人四水庫與鎖定紀律快照", value=True, key="pkg0_inc_pf")
+        p0_c2.caption("💡 專供貼給《淘金客 v24.4》研判大盤多空方向、明日轉折點與四水庫調度，已完整內嵌 8 大核心指標與雙雷達逐項。")
+        pkg0_txt = build_market_panorama_package_v244(
+            fleet, radar, deriv_eff, us_data, breadth, forecast,
+            upcoming_ev_rows, now_str,
+            sb_fini_oi, sb_margin_2d, sb_margin_2d_pct, sb_margin_dd,
+            sb_maint, sb_basis, sb_consec_cover, sb_cover_3d,
+            sb_limit_up, sb_limit_dn, sb_ban_active, days_since_ban,
+            fx_stopped_dep, portfolio_summary=portfolio_summary_obj, include_portfolio=inc_pf_0
+        )
+        st.code(pkg0_txt, language="text")
+
+    # ---- 按鈕 A：初篩海選／守門員快篩（支援跨榜混選 ＋ 手動代號按需補抓） ----
     with pkg_tab_a:
         if not scan_data:
-            st.info("⚡ 目前為【Layer 1 秒開模式】，尚未載入全台 170 檔個股掃描池，以節省開盤等待時間。")
-            if st.button("🚀 點此啟動全台個股掃描 (Layer 2) 並解鎖模式 A 批次包", type="primary", key="btn_l2_tab1_a"):
+            st.info("⚡ 尚未執行 Layer 2 全市場掃描：可點下方按鈕掃描全台 170 檔，或直接在右側手動輸入 1～6 檔代號快篩。")
+            a_top1, a_top2 = st.columns([2.2, 3.0])
+            if a_top1.button("🚀 啟動全台個股掃描 (Layer 2)", type="primary", key="btn_l2_tab1_a", use_container_width=True):
                 _run_layer2_scan()
                 st.rerun()
+            manual_a_fast = a_top2.text_input("⌨️ 或直接輸入 1～6 檔 4 碼代號海選（逗號分隔）", value="", placeholder="例：2330, 3711, 2454, 2383, 2881", key="mode_a_manual_fast")
+            man_a_codes = list(dict.fromkeys(re.findall(r"\b(\d{4})\b", manual_a_fast)))[:6]
+            if man_a_codes and st.button("⚡ 按需補抓並生成【模式 A 守門員快篩包】", type="primary", key="btn_gen_a_fast"):
+                with st.spinner(f"正在補抓 {', '.join(man_a_codes)} 技術指標、真實當沖率與大戶週變動..."):
+                    det_a = fetch_ondemand_stocks_detail(tuple(man_a_codes), fleet["twii_20d_ret"], macro_withdrawal_alert)
+                    tdcc_a = fetch_tdcc_weekly_delta_ondemand(tuple(man_a_codes))
+                    msbl_a = fetch_stock_margin_short_sbl_batch(tuple(man_a_codes))
+                    st.session_state["mode_a_manual_txt"] = build_mode_a_guard_package_v244(man_a_codes, "手動海選", f"自選 {len(man_a_codes)} 檔", det_a, outpost_line, now_str, tdcc_a, margin_sbl_map=msbl_a)
+            if st.session_state.get("mode_a_manual_txt"):
+                st.code(st.session_state["mode_a_manual_txt"], language="text")
         else:
+            union_codes = list(dict.fromkeys(
+                (df_launch_fund["代碼"].tolist() if not df_launch_fund.empty else []) +
+                (df_pullback["代碼"].tolist() if not df_pullback.empty else []) +
+                (df_long_bc["代碼"].tolist() if not df_long_bc.empty else []) +
+                (df_msci_audit[df_msci_audit["MSCI異動別"].str.contains("新增", na=False)]["代碼"].tolist() if not df_msci_audit.empty else []) +
+                (df_granary_audit[~df_granary_audit["代碼"].isin(OLD_GRANARY_ODM_WATCH)]["代碼"].tolist() if not df_granary_audit.empty else []) +
+                (df_long_turn["代碼"].tolist() if not df_long_turn.empty else [])
+            ))
             pool_map = {
+                f"🌟 跨榜聯集海選：全部初篩強股＆新穀倉＆MSCI ({len(union_codes)}檔)": union_codes,
                 f"🔥 短線表1-A：有基之彈旱地拔蔥 ({len(df_launch_fund)}檔)": df_launch_fund["代碼"].tolist() if not df_launch_fund.empty else [],
                 f"🎭 短線表1-B：純技術旱地拔蔥 ({len(df_launch_pure)}檔)": df_launch_pure["代碼"].tolist() if not df_launch_pure.empty else [],
                 f"🎯 短線表二：N字洗盤低接 ({len(df_pullback)}檔)": df_pullback["代碼"].tolist() if not df_pullback.empty else [],
@@ -453,45 +512,82 @@ with tab1:
                 f"🌾 宏爺三大新穀倉＆防彈衣 ({len(df_granary_audit[~df_granary_audit['代碼'].isin(OLD_GRANARY_ODM_WATCH)]) if not df_granary_audit.empty else 0}檔)": df_granary_audit[~df_granary_audit["代碼"].isin(OLD_GRANARY_ODM_WATCH)]["代碼"].tolist() if not df_granary_audit.empty else []
             }
             pool_keys = list(pool_map.keys())
-            default_idx = next((i for i, k in enumerate(pool_keys) if len(pool_map[k]) > 0), 0)
-            pa_c1, pa_c2, pa_c3, pa_c4 = st.columns([2.6, 1.1, 1.8, 1.8])
-            sel_pool_k = pa_c1.selectbox("📂 選擇快篩來源清單", pool_keys, index=default_idx, key="mode_a_pool")
+            pa_c1, pa_c2, pa_c3, pa_c4 = st.columns([2.6, 1.0, 1.7, 1.9])
+            sel_pool_k = pa_c1.selectbox("📂 選擇快篩來源清單（推薦跨榜聯集）", pool_keys, index=0, key="mode_a_pool")
             batch_sz = pa_c2.radio("每批上限", [5, 6], horizontal=True, key="mode_a_bs")
             pool_codes = list(dict.fromkeys([str(x) for x in pool_map[sel_pool_k] if str(x) in all_scanned_details]))
-            if pool_codes:
+            manual_a_str = st.text_input("⌨️ 或手動輸入任意 4 碼代號覆寫本批海選（逗號分隔，上限 6 檔；留空則用上方清單）", value="", placeholder="例：3711, 2330, 2383, 2454, 1519", key="mode_a_manual_ov")
+            man_a_ov = list(dict.fromkeys(re.findall(r"\b(\d{4})\b", manual_a_str)))[:6]
+
+            if man_a_ov:
+                fetch_a_tdcc = pa_c4.checkbox("📡 補抓 FinMind 大戶＆精準當沖", value=True, key="mode_a_tdcc_ov")
+                missing_a = [c for c in man_a_ov if c not in all_scanned_details]
+                merged_a = dict(all_scanned_details)
+                if missing_a:
+                    with st.spinner(f"按需補抓未掃描標的 {', '.join(missing_a)}..."):
+                        merged_a.update(fetch_ondemand_stocks_detail(tuple(missing_a), fleet["twii_20d_ret"], macro_withdrawal_alert))
+                live_tdcc_a = fetch_tdcc_weekly_delta_ondemand(tuple(man_a_ov)) if fetch_a_tdcc else {}
+                msbl_a = fetch_stock_margin_short_sbl_batch(tuple(man_a_ov)) if fetch_a_tdcc else {}
+                st.code(build_mode_a_guard_package_v244(man_a_ov, "手動海選", f"自選 {len(man_a_ov)} 檔", merged_a, outpost_line, now_str, live_tdcc_a, margin_sbl_map=msbl_a), language="text")
+            elif pool_codes:
                 n_batches = (len(pool_codes) + batch_sz - 1) // batch_sz
                 batch_opts = [f"第 {i+1} 批 ({i*batch_sz+1}~{min((i+1)*batch_sz, len(pool_codes))} 檔)" for i in range(n_batches)]
                 sel_b_lbl = pa_c3.selectbox("📑 自動切批切換", batch_opts, key="mode_a_batch")
                 b_idx = batch_opts.index(sel_b_lbl)
                 batch_codes = pool_codes[b_idx * batch_sz : (b_idx + 1) * batch_sz]
-                fetch_a_tdcc = pa_c4.checkbox("📡 補抓本批 FinMind 大戶週變動", value=False, key="mode_a_tdcc")
-                custom_a = st.multiselect("✏️ 可微調本批匯出標的（上限 6 檔）：", options=pool_codes, default=batch_codes, max_selections=6, format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']}", key=f"mode_a_ms_{sel_pool_k}_{b_idx}")
+                fetch_a_tdcc = pa_c4.checkbox("📡 補抓本批 FinMind 大戶＆精準當沖", value=False, key="mode_a_tdcc")
+                custom_a = st.multiselect("✏️ 可跨榜增減微調本批匯出標的（上限 6 檔）：", options=pool_codes, default=batch_codes, max_selections=6, format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']}", key=f"mode_a_ms_{sel_pool_k}_{b_idx}")
                 final_a_codes = custom_a if custom_a else batch_codes
                 live_tdcc_a = fetch_tdcc_weekly_delta_ondemand(tuple(final_a_codes)) if fetch_a_tdcc else {}
-                st.code(build_mode_a_guard_package_v244(final_a_codes, sel_pool_k.split(" (")[0], sel_b_lbl, all_scanned_details, outpost_line, now_str, live_tdcc_a), language="text")
+                msbl_a = fetch_stock_margin_short_sbl_batch(tuple(final_a_codes)) if fetch_a_tdcc else {}
+                st.code(build_mode_a_guard_package_v244(final_a_codes, sel_pool_k.split(" (")[0], sel_b_lbl, all_scanned_details, outpost_line, now_str, live_tdcc_a, margin_sbl_map=msbl_a), language="text")
             else:
-                st.info("目前選擇的清單無符合標的，請切換至『長線表3-B』、『MSCI』或『宏爺穀倉』清單匯出！")
+                st.info("目前選擇的清單無符合標的，請切換至『🌟 跨榜聯集海選』或直接手動輸入代號！")
 
+    # ---- 按鈕 B：決選 PK 比賽深檢（開放 1~5 檔 ＋ 橫向 PK 表 ＋ 資券借 ＋ 週月線 ＋ 雙股比價折價） ----
     with pkg_tab_b:
         if all_scanned_details:
-            all_opt_codes = sorted(all_scanned_details.keys(), key=lambda c: (0 if c in ["3711", "2330", "2884", "2881", "2454", "2383"] else 1, c))
+            all_opt_codes = sorted(all_scanned_details.keys(), key=lambda c: (0 if c in ["3711", "2330", "2884", "2881", "2454", "2383", "2308", "1519"] else 1, c))
             default_b = [c for c in ["3711", "2330"] if c in all_opt_codes][:2]
             pb_c1, pb_c2 = st.columns([3.2, 2.0])
-            sel_b_codes = pb_c1.multiselect("🎯 勾選決選標的（最多 3 檔；含庫存股自動帶入最新成本與紀律）：", options=all_opt_codes, default=default_b, max_selections=3, format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']} ({all_scanned_details[c]['現價']})", key="mode_b_ms")
-            manual_b_str = pb_c2.text_input("⌨️ 或手動輸入 4 碼代號（逗號分隔，上限3檔）", value="", placeholder="例：3711, 2881, 2383", key="mode_b_manual")
+            sel_b_codes = pb_c1.multiselect("🎯 勾選比賽／決選標的（最多 5 檔；庫存股自動帶入成本與停損）：", options=all_opt_codes, default=default_b, max_selections=5, format_func=lambda c: f"{c} {all_scanned_details[c]['_raw_name']} ({all_scanned_details[c]['現價']})", key="mode_b_ms")
+            manual_b_str = pb_c2.text_input("⌨️ 或手動輸入 1～5 檔 4 碼代號（逗號分隔）", value="", placeholder="例：3711, 2330, 2454, 2383", key="mode_b_manual")
         else:
-            st.caption("💡 尚未執行 Layer 2 時可直接輸入代號生成基礎深檢包（含季報防墊料、大戶週變動與大盤前哨）；若需完整 6 條均線與 20MA 扣抵請先按【🚀 啟動全台個股池】。")
+            st.caption("💡 免跑 Layer 2 亦可直接輸入 1～5 檔代號！按下生成將自動按需補抓完整 6 均線、週10/月5MA、20MA扣抵、資券借四位階、真實當沖率與大戶週變動。")
             sel_b_codes = []
-            manual_b_str = st.text_input("⌨️ 直接輸入 1～3 檔 4 碼代號（逗號分隔）", value="3711, 2881", placeholder="例：3711, 2881, 2383", key="mode_b_manual_fast")
-        manual_b_codes = [c for c in re.findall(r"\b(\d{4})\b", manual_b_str)][:3]
+            manual_b_str = st.text_input("⌨️ 直接輸入 1～5 檔 4 碼代號（逗號分隔）", value="3711, 2330", placeholder="例：3711, 2330, 2454, 2881", key="mode_b_manual_fast")
+
+        manual_b_codes = list(dict.fromkeys(re.findall(r"\b(\d{4})\b", manual_b_str)))[:5]
         target_b_codes = manual_b_codes if manual_b_codes else sel_b_codes
-        if st.button("⚡ 生成【淘金客 v24.4 模式 B 深檢戰情包】（補抓季報防墊料 ＋ 大戶週變動）", type="primary", key="btn_gen_mode_b"):
+        if st.button("⚡ 生成【淘金客 v24.4 模式 B 決選 PK 深檢包】（補抓資券借 ＋ 週月線 ＋ 真實當沖 ＋ 大戶週變動）", type="primary", key="btn_gen_mode_b"):
             if target_b_codes:
-                with st.spinner(f"正在抓取 {', '.join(target_b_codes)} 之季報防墊料與集保大戶週變動..."):
+                with st.spinner(f"正在為 {', '.join(target_b_codes)} 補齊完整均線/週月線、資券借四位階、真實當沖、季報防墊料與大戶週變動..."):
+                    merged_b = dict(all_scanned_details)
+                    missing_b = [c for c in target_b_codes if c not in merged_b]
+                    if missing_b:
+                        merged_b.update(fetch_ondemand_stocks_detail(tuple(missing_b), fleet["twii_20d_ret"], macro_withdrawal_alert))
                     live_tdcc_b = fetch_tdcc_weekly_delta_ondemand(tuple(target_b_codes))
-                    st.session_state["mode_b_pkg_txt"] = build_mode_b_deep_package_v244(target_b_codes, all_scanned_details, price_dict_active, outpost_line, now_str, live_tdcc_b, holding_notes_map, radar["master_state"] in ["YELLOW", "RED_LOCKED"])
+                    margin_sbl_b = fetch_stock_margin_short_sbl_batch(tuple(target_b_codes))
+
+                    pair_note_b = ""
+                    if len(target_b_codes) == 2:
+                        c1, c2 = target_b_codes[0], target_b_codes[1]
+                        d1, d2 = merged_b.get(c1, price_dict_active.get(c1, {})), merged_b.get(c2, price_dict_active.get(c2, {}))
+                        m1, m2 = d1.get("_mkt", d1.get("market", "TW")), d2.get("_mkt", d2.get("market", "TW"))
+                        p1, p2 = float(d1.get("現價", d1.get("close", 0)) or 0), float(d2.get("現價", d2.get("close", 0)) or 0)
+                        n1, n2 = d1.get("_raw_name", d1.get("name", c1)), d2.get("_raw_name", d2.get("name", c2))
+                        if p1 > 0 and p2 > 0:
+                            ps_b = fetch_pair_swap_history(c1, m1, c2, m2, p1, p2)
+                            if ps_b.get("ok"):
+                                pair_note_b = f"{n1}({c1}) 換 {n2}({c2})：當下 {ps_b['curr_ratio']:.3f}張換1張 vs 240日中位數 {ps_b['median_ratio']:.3f}張（相對常態折價 {ps_b['discount_pct']:+.1f}%；紅燈豁免門檻≧+10~15%）"
+
+                    st.session_state["mode_b_pkg_txt"] = build_mode_b_deep_package_v244(
+                        target_b_codes, merged_b, price_dict_active, outpost_line, now_str,
+                        live_tdcc_b, holding_notes_map, radar["master_state"] in ["YELLOW", "RED_LOCKED"],
+                        margin_sbl_map=margin_sbl_b, pair_swap_note=pair_note_b
+                    )
             else:
-                st.warning("請先勾選或輸入 1～3 檔個股代號！")
+                st.warning("請先勾選或輸入 1～5 檔個股代號！")
         if st.session_state.get("mode_b_pkg_txt"):
             st.code(st.session_state["mode_b_pkg_txt"], language="text")
 
@@ -510,7 +606,7 @@ with tab1:
 
     # 6. 未來 1～4 週三情境作戰卡片
     st.markdown("#### 🔮 【未來 1～4 週大盤走勢預測與三情境作戰卡片】（100% 自動換行零裁切・每日浮動重算）")
-    fc_view_mode = st.radio("📱 顯示樣式切換", ["🃏 響應式防切字卡片 (電腦/手機預設)", "📊 簡表模式 (供複製)"], horizontal=True, key="fc_view_mode_v64")
+    fc_view_mode = st.radio("📱 顯示樣式切換", ["🃏 響應式防切字卡片 (電腦/手機預設)", "📊 簡表模式 (供複製)"], horizontal=True, key="fc_view_mode_v65")
     if "卡片" in fc_view_mode:
         st.markdown(build_forecast_responsive_cards_html(forecast), unsafe_allow_html=True)
     else:
@@ -617,9 +713,9 @@ with tab2:
         conv_985b_annual_inc = conv_985b_lots * 1000.0 * div_985_ttm
         st.markdown(clean_html(f"""
         <div class="tab-guide-box" style="border-left-color:#fbbf24;">
-        <b>⚠️ 00400A 最後收尾進度（11/26 已轉出 15 張 ➔ 僅剩最後 {sb_lots_00400a:.0f} 張）</b>：<br>
+        <b>⚠️ 00400A 最後收尾進度（僅剩最後 {sb_lots_00400a:.0f} 張）</b>：<br>
         • <b>現況與禁買紅線</b>：00400A 現價 <b>{p_00400a:.2f} 元</b>（餘 {sb_lots_00400a:.0f} 張 @{sb_cost_00400a:.2f}），12/08 除息腰斬至 <b>0.06 元</b>；<b>嚴禁加碼，亦嚴禁買 00406A 與垃圾債</b>。<br>
-        • <b>收尾退場價位</b>：最後 {sb_lots_00400a:.0f} 張鎖定 <b>11.22～{etf_m['00400A']['exit_t2']:.2f} 元</b> 出清（成交後至左側將 00400A 調為 0 並按💾存檔）。<br>
+        • <b>動態收尾退場區</b>：鎖定 <b>{eff_t1_400:.2f}～{eff_t2_400:.2f} 元</b> 出清（可於側邊欄自訂掛賣價；成交後將張數調為 0 並按💾存檔）。<br>
         • <b>收尾轉債效益</b>：剩餘 {sb_lots_00400a:.0f} 張（約 <b>{sell_400a_val/10000:.1f} 萬元</b>）全轉 <b>00985B ({p_00985b:.2f}元)</b> 可再添 <b>{conv_985b_lots:.1f} 張</b>（合計衝破 <b>{sb_lots_00985b + conv_985b_lots:.1f} 張</b>），年債息增至約 <b style="color:#00e676;">{cur_985b_annual_inc + conv_985b_annual_inc:,.0f} 元</b>！
         </div>
         """), unsafe_allow_html=True)
@@ -666,7 +762,7 @@ with tab2:
 # ==================== TAB 3: 短線旱地拔蔥榜 ====================
 with tab3:
     if not scan_data:
-        st.info("💤 【Layer 2 按需載入待機中】點下方按鈕才開始掃描全台 170 檔非殭屍股 K 線、20MA扣抵、處置/注意/除權息與 5 組接軌指標（掃完後與分頁四、五共用免重跑）。")
+        st.info("💤 【Layer 2 按需載入待機中】點下方按鈕才開始掃描全台 170 檔非殭屍股 K 線、週10/月5MA、20MA扣抵、真實當沖率與 5 組接軌指標（掃完後與分頁四、五共用免重跑）。")
         if st.button("🚀 立即啟動全台個股掃描 (Layer 2)", type="primary", key="btn_l2_tab3"):
             _run_layer2_scan()
             st.rerun()
@@ -706,7 +802,7 @@ with tab4:
                 try:
                     with open(MSCI_CACHE_FILE, "w", encoding="utf-8") as f: json.dump(parsed_m, f, ensure_ascii=False)
                     fetch_dynamic_msci_data.clear()
-                    st.session_state.pop("v64_scan_data", None)
+                    st.session_state.pop("v65_scan_data", None)
                     st.success("✅ 已解析並儲存最新季度 MSCI 名單！請重新啟動 Layer 2 掃描套用。")
                 except Exception as e:
                     st.error(f"儲存失敗：{e}")
@@ -775,10 +871,10 @@ with tab6:
     rev_b1, rev_b2 = st.columns([2.5, 4.5])
     if rev_b1.button("📊 啟動／重抓 1,972 家上市櫃月營收與三率估值 (Layer 3)", type="primary", key="btn_l3_rev"):
         with st.spinner("📡 Layer 3 執行中：正在下載全市場 1,972 家最新月營收、法人買賣超與三率 EPS 估值..."):
-            st.session_state["v64_rev_df"] = fetch_all_monthly_revenue_df_on_demand()
+            st.session_state["v65_rev_df"] = fetch_all_monthly_revenue_df_on_demand()
             st.rerun()
 
-    df_all_rev = st.session_state.get("v64_rev_df", pd.DataFrame())
+    df_all_rev = st.session_state.get("v65_rev_df", pd.DataFrame())
     if df_all_rev.empty:
         rev_b2.info("💤 【Layer 3 按需載入待機中】點左側按鈕才爬取 1,972 家月營收與財報，避免拖慢每日開盤速度。")
     else:
@@ -827,7 +923,7 @@ with tab6:
                 v_col2.success(f"✅ 已完成 24 個月破繭驗證！共 {len(df_filtered)} 檔純破繭轉機股。")
 
         df_display_rev = df_filtered.drop(columns=["_tdcc_num"], errors="ignore")
-        st.download_button(label=f"📥 下載當前篩選月營收與法人估值表 ({len(df_display_rev)} 家) CSV", data=df_display_rev.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), file_name=f"tw_rev_v64_{target_latest_ym}.csv", mime="text/csv")
+        st.download_button(label=f"📥 下載當前篩選月營收與法人估值表 ({len(df_display_rev)} 家) CSV", data=df_display_rev.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), file_name=f"tw_rev_v65_{target_latest_ym}.csv", mime="text/csv")
 
         def color_rev_val(val):
             try:
