@@ -45,57 +45,39 @@ div[data-testid="stMarkdownContainer"] { overflow-wrap: anywhere; word-break: br
 </style>
 """, unsafe_allow_html=True)
 
-# 副程式自動重載防呆（遇模組更新不同步時自動 reload）
+# 副程式自動重載防呆（偵測檔案修改時間，有異動才重載一次，不影響快取速度）
 import config_events, data_engine, charts_ui
-try:
-    from config_events import (
-        get_tw_now, get_target_revenue_ym_list, get_volume_multiplier, clean_html,
-        pin_code_name_index, is_zombie_stock_tiered, style_tw_stock_df, prioritize_granary_and_armor_df,
-        CUSTOM_EVENTS_FILE, MSCI_CACHE_FILE, MSCI_THEME_BELLWETHERS, OLD_GRANARY_ODM_WATCH,
-        CORE_WATCHLIST, POLICY_DEFENSE_ARMOR, CONSTRUCTION_BLACKLIST,
-        infer_msci_theme, parse_msci_text_override, get_dynamic_rolling_events
-    )
-    from data_engine import (
-        fetch_dynamic_msci_data, fetch_mis_realtime_core16, fetch_market_prices_fast,
-        fetch_us_sectors_and_leaders, fetch_auto_derivatives_and_margin_v63,
-        compute_dynamic_market_forecast, fetch_and_analyze_fleet_fast,
-        fetch_tdcc_weekly_delta_ondemand, fetch_pair_swap_history,
-        scan_all_stocks_on_demand, fetch_all_monthly_revenue_df_on_demand, verify_24m_first_breakout_batch
-    )
-    from charts_ui import (
-        build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
-        build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
-        build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
-        build_forecast_responsive_cards_html, compute_tw_hot_sectors,
-        build_8_indicator_panels_html, build_market_outpost_line_v244,
-        build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
-    )
-except ImportError:
-    importlib.reload(config_events)
-    importlib.reload(data_engine)
-    importlib.reload(charts_ui)
-    from config_events import (
-        get_tw_now, get_target_revenue_ym_list, get_volume_multiplier, clean_html,
-        pin_code_name_index, is_zombie_stock_tiered, style_tw_stock_df, prioritize_granary_and_armor_df,
-        CUSTOM_EVENTS_FILE, MSCI_CACHE_FILE, MSCI_THEME_BELLWETHERS, OLD_GRANARY_ODM_WATCH,
-        CORE_WATCHLIST, POLICY_DEFENSE_ARMOR, CONSTRUCTION_BLACKLIST,
-        infer_msci_theme, parse_msci_text_override, get_dynamic_rolling_events
-    )
-    from data_engine import (
-        fetch_dynamic_msci_data, fetch_mis_realtime_core16, fetch_market_prices_fast,
-        fetch_us_sectors_and_leaders, fetch_auto_derivatives_and_margin_v63,
-        compute_dynamic_market_forecast, fetch_and_analyze_fleet_fast,
-        fetch_tdcc_weekly_delta_ondemand, fetch_pair_swap_history,
-        scan_all_stocks_on_demand, fetch_all_monthly_revenue_df_on_demand, verify_24m_first_breakout_batch
-    )
-    from charts_ui import (
-        build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
-        build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
-        build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
-        build_forecast_responsive_cards_html, compute_tw_hot_sectors,
-        build_8_indicator_panels_html, build_market_outpost_line_v244,
-        build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
-    )
+_need_reload = False
+for _m in (config_events, data_engine, charts_ui):
+    if getattr(_m, "__file__", None):
+        _mt = os.path.getmtime(_m.__file__)
+        if _need_reload or getattr(_m, "_loaded_mtime", None) != _mt:
+            importlib.reload(_m)
+            _m._loaded_mtime = _mt
+            _need_reload = True
+
+from config_events import (
+    get_tw_now, get_target_revenue_ym_list, get_volume_multiplier, clean_html,
+    pin_code_name_index, is_zombie_stock_tiered, style_tw_stock_df, prioritize_granary_and_armor_df,
+    CUSTOM_EVENTS_FILE, MSCI_CACHE_FILE, MSCI_THEME_BELLWETHERS, OLD_GRANARY_ODM_WATCH,
+    CORE_WATCHLIST, POLICY_DEFENSE_ARMOR, CONSTRUCTION_BLACKLIST,
+    infer_msci_theme, parse_msci_text_override, get_dynamic_rolling_events
+)
+from data_engine import (
+    fetch_dynamic_msci_data, fetch_mis_realtime_core16, fetch_market_prices_fast,
+    fetch_us_sectors_and_leaders, fetch_auto_derivatives_and_margin_v63,
+    compute_dynamic_market_forecast, fetch_and_analyze_fleet_fast,
+    fetch_tdcc_weekly_delta_ondemand, fetch_pair_swap_history,
+    scan_all_stocks_on_demand, fetch_all_monthly_revenue_df_on_demand, verify_24m_first_breakout_batch
+)
+from charts_ui import (
+    build_intraday_timeline_banner_html, evaluate_crash_and_bottom_radar_v244,
+    build_daily_summary_and_3day_card_html, build_event_timeline_svg_html,
+    build_realtime_forecast_svg_raw, build_realtime_and_forecast_svg_html,
+    build_forecast_responsive_cards_html, compute_tw_hot_sectors,
+    build_8_indicator_panels_html, build_market_outpost_line_v244,
+    build_mode_a_guard_package_v244, build_mode_b_deep_package_v244
+)
 
 ZOOM_OPT_MAP = {"自適應 (預設)": "auto", "🔍 1.5x 放大": "1.5x", "🔎 2.0x 超大": "2.0x"}
 
