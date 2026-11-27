@@ -318,11 +318,12 @@ def build_daily_summary_and_3day_card_html(
     sc_sum = deriv.get("spot_fini_consec_sum", deriv.get("spot_fini_5d_sum", 0.0))
     sc_lbl = f"連買{sc}日({sc_sum:+.0f}億)" if sc > 0 else (f"連賣{abs(sc)}日({sc_sum:+.0f}億)" if sc < 0 else "持平")
     c4_concl = f"⚖️ 站回年線 ({ma240:,.0f}) ＆ 連 3 日站穩 10MA ({ma10:,.0f}) 始脫逃命波"
-    c4_lines = [
-        f"• <b>防守／轉強線</b>：守穩日 5MA <b>{ma5:,.0f}</b>，上攻須帶量收復年線 <b>{ma240:,.0f}</b>",
-        f"• <b>三共振解鎖鍵</b>：外資現貨轉買（目前 {sc_lbl}）＋ 期貨 ΔOI 連 3 日補萬口 ＋ 台幣止貶",
-        f"• <b>特定法人對照</b>：{'前五 ' + f'{deriv[\"top5_spec_net\"]:+,}' + ' / 前十 ' + f'{deriv[\"top10_spec_net\"]:+,}' + ' 口（破解ETF避險干擾）' if deriv.get('top_spec_valid') else '持續追蹤期貨實質淨額與台幣動向'}"
-    ]
+   spec_c4 = f"前五 {deriv['top5_spec_net']:+,} / 前十 {deriv['top10_spec_net']:+,} 口（破解ETF避險干擾）" if deriv.get("top_spec_valid") else "持續追蹤期貨實質淨額與台幣動向"
+c4_lines = [
+    f"• <b>防守／轉強線</b>：守穩日 5MA <b>{ma5:,.0f}</b>，上攻須帶量收復年線 <b>{ma240:,.0f}</b>",
+    f"• <b>三共振解鎖鍵</b>：外資現貨轉買（目前 {sc_lbl}）＋ 期貨 ΔOI 連 3 日補萬口 ＋ 台幣止貶",
+    f"• <b>特定法人對照</b>：{spec_c4}"
+]
 
     b_col = "#ff4d4f" if radar["master_state"] == "RED_LOCKED" else ("#fbbf24" if radar["master_state"] == "YELLOW" else "#00e676")
     def _box(title, concl, lines, accent):
