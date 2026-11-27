@@ -12,7 +12,7 @@ from config_events import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
-# 0. 美股休市／提前收盤自動偵測（修正「休市休市」贅字）
+# 0. 美股休市／提前收盤自動偵測
 # ==========================================
 US_NYSE_HOLIDAYS = {
     "2026-01-01": "元旦", "2026-01-19": "馬丁路德金紀念日", "2026-02-16": "總統日",
@@ -51,7 +51,7 @@ def get_us_market_holiday_status() -> dict:
     return {"is_holiday": False, "is_early_close": False, "holiday_name": "", "us_date": et_iso, "banner_note": ""}
 
 # ==========================================
-# 1. 雙市處置股、上市注意股、近5日除權息與 MSCI 動態池
+# 1. 雙市處置股、上市注意股、近5日除權息、MSCI 與債券 ETF 預估淨值（哨兵 D）
 # ==========================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_twse_disposition_codes():
@@ -127,8 +127,38 @@ def fetch_dynamic_msci_data(sig: int = 1) -> dict:
     data_out["disposition_map"] = fetch_twse_disposition_codes()
     return data_out
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_bond_etf_nav_and_premium(codes_tuple=("00985B", "00933B", "00687B")) -> dict:
+    """v65.2 新增：抓取證交所／櫃買 ETF 即時預估淨值與折溢價（供債市哨兵 D 使用）"""
+    target_set = set(codes_tuple)
+    out = {c: {"price": None, "nav": None, "prem_pct": None, "ok": False} for c in target_set}
+    try:
+        r = requests.get(
+            f"https://mis.twse.com.tw/stock/data/all_etf.txt?_={int(time.time() * 1000)}",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://mis.twse.com.tw/stock/etf_nav.jsp"},
+            timeout=5, verify=False
+        )
+        if r.status_code == 200:
+            j = r.json()
+            for grp in j.get("a1", []):
+                for item in grp.get("msgArray", []):
+                    c = str(item.get("a", "")).strip()
+                    if c in target_set:
+                        try:
+                            p_v = float(str(item.get("e", "0")).replace(",", "").strip() or 0)
+                            nav_v = float(str(item.get("f", "0")).replace(",", "").strip() or 0)
+                            prem_s = str(item.get("g", "")).replace(",", "").replace("%", "").strip()
+                            if nav_v > 0:
+                                prem_v = float(prem_s) if prem_s not in ["", "-", "--"] else round(((p_v - nav_v) / nav_v) * 100.0, 2)
+                                out[c] = {"price": round(p_v, 2) if p_v > 0 else None, "nav": round(nav_v, 2), "prem_pct": round(prem_v, 2), "ok": True}
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    return out
+
 # ==========================================
-# 2. 即時報價、類股結構（修正電子工業＆非金電匹配）、廣度與美股＋信用利差
+# 2. 即時報價、類股結構、廣度與美股＋ES/NQ電子盤＋信用利差
 # ==========================================
 def parse_mis_price(item, is_index=False):
     def to_f(val):
@@ -198,7 +228,8 @@ def fetch_yahoo_v8_realtime(ticker_symbol, decimals=2):
 def fetch_mis_realtime_batch(code_market_tuples):
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://mis.twse.com.tw/stock/index.jsp", "Cache-Control": "no-cache"}
     rt_dict = {}
-    all_pairs = list(dict.fromkeys(list(code_market_tuples) + CORE_PORTFOLIO_16))
+    bond_extra = [("00933B", "TWO"), ("00687B", "TWO")]
+    all_pairs = list(dict.fromkeys(list(code_market_tuples) + CORE_PORTFOLIO_16 + bond_extra))
     queries = ["tse_t00.tw", "otc_o00.tw"] + [f"{'tse' if m == 'TW' else 'otc'}_{c}.tw" for c, m in all_pairs]
     for i in range(0, len(queries), 25):
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(queries[i:i + 25])}&json=1&delay=0&_={int(time.time() * 1000)}"
@@ -241,7 +272,6 @@ def fetch_mis_realtime_core16():
 
 @st.cache_data(ttl=180, show_spinner=False)
 def fetch_market_sector_indices() -> dict:
-    """v65.1 修正：精準匹配證交所正式名稱『電子工業類指數』與『未含金融電子指數』"""
     out = {"elec_chg": None, "semi_chg": None, "fin_chg": None, "non_ef_chg": None, "date_iso": ""}
     try:
         r = requests.get("https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?type=IND&response=json", headers={"User-Agent": "Mozilla/5.0"}, timeout=5, verify=False)
@@ -260,14 +290,10 @@ def fetch_market_sector_indices() -> dict:
                             val = -val
                     except Exception:
                         continue
-                    if nm in ["電子類指數", "電子工業類指數"]:
-                        out["elec_chg"] = round(val, 2)
-                    elif nm in ["半導體類指數", "半導體業類指數"]:
-                        out["semi_chg"] = round(val, 2)
-                    elif nm in ["金融保險類指數", "金融保險業類指數"]:
-                        out["fin_chg"] = round(val, 2)
-                    elif ("未含金融電子" in nm) or ("非金電" in nm):
-                        out["non_ef_chg"] = round(val, 2)
+                    if nm in ["電子類指數", "電子工業類指數"]: out["elec_chg"] = round(val, 2)
+                    elif nm in ["半導體類指數", "半導體業類指數"]: out["semi_chg"] = round(val, 2)
+                    elif nm in ["金融保險類指數", "金融保險業類指數"]: out["fin_chg"] = round(val, 2)
+                    elif ("未含金融電子" in nm) or ("非金電" in nm): out["non_ef_chg"] = round(val, 2)
     except Exception:
         pass
     return out
@@ -277,7 +303,7 @@ def fetch_market_prices_fast():
     headers = {"User-Agent": "Mozilla/5.0"}
     price_dict = {}
     twii_fmtqik = {"close": 0.0, "prev_close": 0.0, "chg_pct": 0.0, "date_iso": "", "val_yi": 0.0, "val_map": {}}
-    track_etfs = {"0050", "00631L", "00400A", "00985B", "00713"}
+    track_etfs = {"0050", "00631L", "00400A", "00985B", "00933B", "00687B", "00713"}
 
     try:
         r_idx = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK", headers=headers, timeout=6, verify=False)
@@ -390,7 +416,8 @@ def fetch_market_prices_fast():
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_us_sectors_and_leaders():
-    all_syms = ["%5EVIX", "%5ESOX", "%5ETNX", "%5EGSPC", "%5EIXIC", "%5EDJI", "NQ=F", "SGOV", "HYG", "LQD"]
+    """v65.2 強化：同步抓取 ES=F（標普期指電子盤）與 NQ=F，並保留盤後獨立漲跌幅供紅漲綠跌上色"""
+    all_syms = ["%5EVIX", "%5ESOX", "%5ETNX", "%5EGSPC", "%5EIXIC", "%5EDJI", "NQ=F", "ES=F", "SGOV", "HYG", "LQD"]
     for etf_sym, _, leaders in US_SECTOR_DEFINITIONS:
         all_syms.append(etf_sym)
         for l_sym, _ in leaders:
@@ -416,16 +443,19 @@ def fetch_us_sectors_and_leaders():
     holiday_info = get_us_market_holiday_status()
     m_state = quotes_map.get("TSM", {}).get("mkt_state", "CLOSED")
     nq_chg = quotes_map.get("NQ=F", {}).get("chg_pct", 0.0)
+    es_q = quotes_map.get("ES=F", {})
+    es_chg, es_close = es_q.get("chg_pct", 0.0), es_q.get("close", 0.0)
+
     if holiday_info["is_holiday"]:
-        us_session_tag = f"🇺🇸【美股{holiday_info['holiday_name']}休市・僅期貨薄量 (NQ {nq_chg:+.2f}%)】"
+        us_session_tag = f"🇺🇸【美股{holiday_info['holiday_name']}休市・僅期貨薄量 (NQ {nq_chg:+.2f}% / ES {es_chg:+.2f}%)】"
     elif holiday_info["is_early_close"]:
-        us_session_tag = f"⏰【美股提前收盤日・NQ {nq_chg:+.2f}%】"
+        us_session_tag = f"⏰【美股提前收盤日・NQ {nq_chg:+.2f}% / ES {es_chg:+.2f}%】"
     elif m_state == "REGULAR":
         us_session_tag = "🟢【美股盤中即時交易中】"
     elif m_state in ["PRE", "PREPRE"]:
-        us_session_tag = f"🌅【美股收盤＋盤前電子盤 (NQ {nq_chg:+.2f}%)】"
+        us_session_tag = f"🌅【美股收盤＋盤前電子盤 (NQ {nq_chg:+.2f}% / ES {es_chg:+.2f}%)】"
     else:
-        us_session_tag = f"🏁【美股正規收盤 ＋ 🌙盤後/那指期 (NQ {nq_chg:+.2f}%)】"
+        us_session_tag = f"🏁【美股正規收盤 ＋ 🌙盤後電子盤 (NQ {nq_chg:+.2f}% / ES {es_chg:+.2f}%)】"
 
     sector_list = []
     for etf_sym, sec_name, leaders in US_SECTOR_DEFINITIONS:
@@ -443,18 +473,17 @@ def fetch_us_sectors_and_leaders():
     sector_list.sort(key=lambda x: x["chg_pct"], reverse=True)
     return {
         "session_tag": us_session_tag, "holiday_info": holiday_info, "quotes": quotes_map,
-        "tnx_val": tnx_val, "tnx_chg": tnx_chg, "nq_chg": nq_chg,
+        "tnx_val": tnx_val, "tnx_chg": tnx_chg, "nq_chg": nq_chg, "es_chg": es_chg, "es_close": es_close,
         "hyg_chg": hyg_chg, "lqd_chg": lqd_chg, "credit_spread_alert": credit_spread_alert, "credit_spread_str": credit_spread_str,
         "top_up_sectors": [x["summary"] for x in sector_list[:3]],
         "bot_dn_sectors": [x["summary"] for x in sorted(sector_list, key=lambda x: x["chg_pct"])[:2]]
     }
 
 # ==========================================
-# 3. v65.1 新增：夜盤 4 時段時間感知路由 ＋ 前五大/十大特定法人 ＋ 選擇權 Max OI
+# 3. 夜盤 4 時段時間感知路由（新增鉅亨網 cnyes 即時備援）＋ 特定法人 ＋ Max OI
 # ==========================================
 def classify_night_session_window(now_tw) -> tuple[str, str]:
-    """依台北時間嚴格判定台指期夜盤所處時段，徹底杜絕拿 11 小時前舊結算冒充即時夜盤"""
-    wd = now_tw.weekday()  # 0=週一 ... 4=週五, 5=週六, 6=週日
+    wd = now_tw.weekday()
     t_min = now_tw.hour * 60 + now_tw.minute
     if (wd <= 4 and t_min >= 900) or (1 <= wd <= 5 and t_min < 300):
         open_d = now_tw.date() if t_min >= 900 else (now_tw.date() - datetime.timedelta(days=1))
@@ -466,7 +495,6 @@ def classify_night_session_window(now_tw) -> tuple[str, str]:
     return "WEEKEND", now_tw.strftime("%Y-%m-%d")
 
 def _fetch_taifex_top_traders_and_max_oi(now_tw, headers: dict) -> dict:
-    """v65.1 新增：抓取期交所『前五大／前十大特定法人台指期淨未平倉』與『選擇權 Max OI 買權壓力／賣權支撐履約價』"""
     out = {
         "top5_spec_net": None, "top10_spec_net": None, "top_spec_all_10": None, "top_spec_date": "", "top_spec_valid": False,
         "max_oi_call_strike": None, "max_oi_call_oi": 0, "max_oi_put_strike": None, "max_oi_put_oi": 0,
@@ -479,7 +507,6 @@ def _fetch_taifex_top_traders_and_max_oi(now_tw, headers: dict) -> dict:
         m = re.search(r"\(([-+]?[\d,]+)\)", str(s))
         return _num(m.group(1)) if m else 0
 
-    # A. 前五大／前十大特定法人台指期淨未平倉
     try:
         r_lt = requests.post(
             "https://www.taifex.com.tw/cht/3/largeTraderFutDown",
@@ -502,49 +529,16 @@ def _fetch_taifex_top_traders_and_max_oi(now_tw, headers: dict) -> dict:
                     all_rows = sub[sub.iloc[:, 2].astype(str).str.contains("999999|所有", na=False)]
                     if not near_rows.empty:
                         rn = near_rows.iloc[0]
-                        b5, s5 = _paren_num(rn[b5_col]), _paren_num(rn[s5_col])
-                        b10, s10 = _paren_num(rn[b10_col]), _paren_num(rn[s10_col])
+                        b5, s5, b10, s10 = _paren_num(rn[b5_col]), _paren_num(rn[s5_col]), _paren_num(rn[b10_col]), _paren_num(rn[s10_col])
                         if any(x > 0 for x in [b5, s5, b10, s10]):
-                            out["top5_spec_net"], out["top10_spec_net"] = b5 - s5, b10 - s10
-                            out["top_spec_date"], out["top_spec_valid"] = ld_lt, True
+                            out["top5_spec_net"], out["top10_spec_net"], out["top_spec_date"], out["top_spec_valid"] = b5 - s5, b10 - s10, ld_lt, True
                     if not all_rows.empty:
                         ra = all_rows.iloc[0]
                         b10a, s10a = _paren_num(ra[b10_col]), _paren_num(ra[s10_col])
-                        if b10a > 0 or s10a > 0:
-                            out["top_spec_all_10"] = b10a - s10a
+                        if b10a > 0 or s10a > 0: out["top_spec_all_10"] = b10a - s10a
     except Exception:
         pass
 
-    if not out["top_spec_valid"]:
-        try:
-            r_lt2 = requests.get("https://openapi.taifex.com.tw/v1/MarketDataOfLargeTradersFuturesPosition", headers=headers, timeout=5, verify=False)
-            if r_lt2.status_code == 200 and isinstance(r_lt2.json(), list):
-                tx_o = [x for x in r_lt2.json() if str(x.get("Contract", "")).strip() == "TX"]
-                if tx_o:
-                    near_o = [x for x in tx_o if str(x.get("ContractMonth", "")).strip() not in ["999999", "所有契約", "All"]]
-                    near_o.sort(key=lambda x: str(x.get("ContractMonth", "")))
-                    all_o = [x for x in tx_o if str(x.get("ContractMonth", "")).strip() in ["999999", "所有契約", "All"]]
-                    def _kget(d, pats):
-                        for k, v in d.items():
-                            kl = k.lower()
-                            if all(p in kl for p in pats): return _num(v)
-                        return 0
-                    if near_o:
-                        r0 = near_o[0]
-                        b5, s5 = _kget(r0, ["5", "spec", "buy"]), _kget(r0, ["5", "spec", "sell"])
-                        b10, s10 = _kget(r0, ["10", "spec", "buy"]), _kget(r0, ["10", "spec", "sell"])
-                        if any(x > 0 for x in [b5, s5, b10, s10]):
-                            out["top5_spec_net"], out["top10_spec_net"] = b5 - s5, b10 - s10
-                            out["top_spec_date"] = parse_roc_or_iso_date(r0.get("Date", ""))
-                            out["top_spec_valid"] = True
-                    if all_o:
-                        b10a, s10a = _kget(all_o[0], ["10", "spec", "buy"]), _kget(all_o[0], ["10", "spec", "sell"])
-                        if b10a > 0 or s10a > 0:
-                            out["top_spec_all_10"] = b10a - s10a
-        except Exception:
-            pass
-
-    # B. 選擇權最大未平倉履約價 (Max OI Call=上檔天花板 / Put=下檔地板)
     try:
         r_opt = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportOpt", headers=headers, timeout=6, verify=False)
         if r_opt.status_code == 200 and isinstance(r_opt.json(), list):
@@ -553,24 +547,19 @@ def _fetch_taifex_top_traders_and_max_oi(now_tw, headers: dict) -> dict:
                 if str(row.get("Contract", "")).strip() != "TXO": continue
                 sess = str(row.get("TradingSession", "")).strip()
                 if sess not in ["一般", "Regular", ""]: continue
-                cm = str(row.get("ContractMonth(Week)", "")).strip()
-                cp = str(row.get("Call/Put", "")).strip()
-                oi = _num(row.get("OpenInterest", 0))
+                cm, cp, oi = str(row.get("ContractMonth(Week)", "")).strip(), str(row.get("Call/Put", "")).strip(), _num(row.get("OpenInterest", 0))
                 try: strike = int(round(float(str(row.get("StrikePrice", "0")).replace(",", "").strip())))
                 except Exception: strike = 0
                 if cm and oi > 0 and strike > 5000:
                     by_cm.setdefault(cm, {"tot": 0, "C": {}, "P": {}})
                     by_cm[cm]["tot"] += oi
                     side = "C" if ("Call" in cp or "買" in cp) else ("P" if ("Put" in cp or "賣" in cp) else "")
-                    if side:
-                        by_cm[cm][side][strike] = by_cm[cm][side].get(strike, 0) + oi
+                    if side: by_cm[cm][side][strike] = by_cm[cm][side].get(strike, 0) + oi
             if by_cm:
-                # 挑選總 OI 最大的主力到期合約（兼顧週選與月選）
                 best_cm = max(by_cm.keys(), key=lambda k: by_cm[k]["tot"])
                 c_map, p_map = by_cm[best_cm]["C"], by_cm[best_cm]["P"]
                 if c_map and p_map:
-                    c_max_k = max(c_map.keys(), key=lambda k: c_map[k])
-                    p_max_k = max(p_map.keys(), key=lambda k: p_map[k])
+                    c_max_k, p_max_k = max(c_map.keys(), key=lambda k: c_map[k]), max(p_map.keys(), key=lambda k: p_map[k])
                     out["max_oi_call_strike"], out["max_oi_call_oi"] = c_max_k, c_map[c_max_k]
                     out["max_oi_put_strike"], out["max_oi_put_oi"] = p_max_k, p_map[p_max_k]
                     out["max_oi_contract"], out["max_oi_valid"] = best_cm, True
@@ -578,9 +567,6 @@ def _fetch_taifex_top_traders_and_max_oi(now_tw, headers: dict) -> dict:
         pass
     return out
 
-# ==========================================
-# 4. 期貨雙口徑 ΔOI ＋ 夜盤 4 時段路由 ＋ 特定法人 ＋ Max OI ＋ 外資 20 日連買賣
-# ==========================================
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
     headers = {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}
@@ -633,7 +619,7 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
         except Exception:
             pass
 
-    # B. 並發回溯近 20 交易日 BFI82U（外資真實連買賣天數）
+    # B. 並發回溯近 20 交易日 BFI82U
     cand_dates = []
     for d_back in range(0, 32):
         chk_dt = now_tw - datetime.timedelta(days=d_back)
@@ -676,8 +662,7 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
                 consec_sp += first_sign; consec_sum += fv
             else:
                 break
-        res["spot_fini_consec"] = consec_sp
-        res["spot_fini_consec_sum"] = round(consec_sum, 1)
+        res["spot_fini_consec"], res["spot_fini_consec_sum"] = consec_sp, round(consec_sum, 1)
         res["spot_fini_5d_sum"] = round(sum(x[1] for x in spot_days_full[:5]), 1)
 
     # C. 大台＋小台三大法人
@@ -776,7 +761,6 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
         except Exception:
             pass
 
-    # C2. v65.1 新增：前五大/十大特定法人 ＋ 選擇權 Max OI
     res.update(_fetch_taifex_top_traders_and_max_oi(now_tw, headers))
 
     # D1. 台指期日盤與期現貨價差
@@ -807,21 +791,6 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
 
     if not tx_ok:
         try:
-            r_tx = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", headers=headers, timeout=5, verify=False)
-            if r_tx.status_code == 200 and isinstance(r_tx.json(), list):
-                tx_rows = [row for row in r_tx.json() if str(row.get("Contract", "")).strip() == "TX" and len(str(row.get("ContractMonth(Week)", "")).strip()) == 6 and str(row.get("TradingSession", "")).strip() in ["一般", "Regular", ""]]
-                if tx_rows:
-                    tx_rows.sort(key=lambda x: str(x.get("ContractMonth(Week)", "")))
-                    row0 = tx_rows[0]
-                    f_iso = parse_roc_or_iso_date(row0.get("Date", ""))
-                    c_tx = float(str(row0.get("Last", row0.get("SettlementPrice", "0"))).replace(",", "").strip())
-                    if c_tx > 5000 and f_iso == twii_date_iso:
-                        res["tx_close"], res["basis_pts"], res["basis_valid"], res["basis_src"], tx_ok = c_tx, round(c_tx - twii_now, 0), True, f"期交所OpenAPI({f_iso})", True
-        except Exception:
-            pass
-
-    if not tx_ok:
-        try:
             st_d = (now_tw - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
             r_tx2 = requests.get(f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date={st_d}", timeout=5, verify=False)
             if r_tx2.status_code == 200 and r_tx2.json().get("data"):
@@ -838,101 +807,70 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
     if not tx_ok:
         res["basis_src"] = f"跨日待盤後同步(現貨{twii_date_iso})"
 
-    # D2. 🌙 v65.1 核心升級：夜盤 4 時段時間感知路由（交易時段嚴禁退回 11 小時前舊結算！）
+    # D2. 🌙 夜盤 4 時段路由（v65.2 新增鉅亨網 cnyes 即時 API 優先備援）
     if night_window == "NIGHT_LIVE":
         live_hit = False
-        # 通道 1：期交所 MIS 即時夜盤 (MarketType=1)，嚴格驗證日期/時間 >= 本場開盤
+        open_dt_tw = pytz.timezone("Asia/Taipei").localize(datetime.datetime.strptime(f"{night_open_iso} 15:00:00", "%Y-%m-%d %H:%M:%S"))
+        open_ts = int(open_dt_tw.timestamp())
+
+        # 通道 1：鉅亨網 cnyes 即時台指期夜盤（海外雲端友善）
         try:
-            r_ah = requests.post(
-                "https://mis.taifex.com.tw/futures/api/getQuoteList",
-                json={"MarketType": "1", "SymbolType": "F", "KindID": "1", "CID": "TXF", "ExpireMonth": "", "RowSize": "全部", "PageNo": "", "SortColumn": "", "AscDesc": "A"},
-                headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}, timeout=4, verify=False
-            )
-            if r_ah.status_code == 200:
-                q_ah = r_ah.json().get("RtData", {}).get("QuoteList", [])
-                ah_rows = [
-                    q for q in q_ah
-                    if str(q.get("SymbolID", "")).strip().startswith("TXF")
-                    and ("-" not in str(q.get("SymbolID", ""))) and ("/" not in str(q.get("SymbolID", "")))
-                    and ("現貨" not in str(q.get("DispCName", "")))
-                    and str(q.get("CLastPrice", "")).replace(",", "").replace(".", "").isdigit()
-                    and float(str(q.get("CLastPrice", "0")).replace(",", "")) > 5000
-                ]
-                if ah_rows:
-                    q0 = ah_rows[0]
-                    c_dt = parse_roc_or_iso_date(q0.get("CDate", ""))
-                    c_tm = str(q0.get("CTime", "")).strip()
-                    tm_hhmm = int(c_tm[:4]) if (len(c_tm) >= 4 and c_tm[:4].isdigit()) else 0
-                    is_fresh_live = (c_dt > night_open_iso) or (c_dt == night_open_iso and tm_hhmm >= 1500)
-                    if is_fresh_live:
-                        n_last = float(str(q0.get("CLastPrice", "0")).replace(",", ""))
-                        n_ref_s = str(q0.get("CRefPrice", "0")).replace(",", "").strip()
-                        n_ref = float(n_ref_s) if n_ref_s.replace(".", "").isdigit() and float(n_ref_s) > 5000 else (res["tx_close"] or twii_now)
-                        n_chg = round(n_last - n_ref, 0)
-                        n_pct = round((n_chg / max(1.0, n_ref)) * 100.0, 2)
-                        tm_fmt = f"{c_tm[:2]}:{c_tm[2:4]}" if len(c_tm) >= 4 and c_tm[:4].isdigit() else c_tm
+            r_cn = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWF:TXFA:FUTURES,TWF:TXF:FUTURES", headers={"User-Agent": "Mozilla/5.0"}, timeout=4, verify=False)
+            if r_cn.status_code == 200:
+                for it in r_cn.json().get("data", []):
+                    p_c = float(it.get("6", 0) or 0)
+                    ts_c = int(it.get("200007", 0) or 0)
+                    if p_c > 5000 and ts_c >= open_ts:
+                        chg_c = float(it.get("11", 0) or 0)
+                        pct_c = float(it.get("56", 0) or 0)
+                        dt_c = datetime.datetime.fromtimestamp(ts_c, pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
                         res["night_valid"], res["night_is_live_mis"], live_hit = True, True, True
-                        res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = round(n_last, 0), n_chg, n_pct
-                        res["night_tx_time"], res["night_src"] = f"{c_dt} {tm_fmt}".strip(), "期交所MIS即時"
+                        res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = round(p_c, 0), round(chg_c, 0), round(pct_c, 2)
+                        res["night_tx_time"], res["night_src"] = dt_c, "鉅亨網夜盤即時"
+                        break
         except Exception:
             pass
 
-        # 通道 2：Yahoo 台灣期貨即時備援（僅採信時間戳 >= 本場 15:00 開盤）
+        # 通道 2：期交所 MIS 即時夜盤 (MarketType=1)
         if not live_hit:
             try:
-                open_dt_tw = pytz.timezone("Asia/Taipei").localize(datetime.datetime.strptime(f"{night_open_iso} 15:00:00", "%Y-%m-%d %H:%M:%S"))
-                open_ts = int(open_dt_tw.timestamp())
-                r_yh = requests.get(
-                    "https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=change,changePercent,price,regularMarketTime,symbol;symbols=WTX%26",
-                    headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5, verify=False
+                r_ah = requests.post(
+                    "https://mis.taifex.com.tw/futures/api/getQuoteList",
+                    json={"MarketType": "1", "SymbolType": "F", "KindID": "1", "CID": "TXF", "ExpireMonth": "", "RowSize": "全部", "PageNo": "", "SortColumn": "", "AscDesc": "A"},
+                    headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}, timeout=4, verify=False
                 )
-                if r_yh.status_code == 200:
-                    j_yh = r_yh.json()
-                    lst_y = j_yh if isinstance(j_yh, list) else j_yh.get("list", [])
-                    if lst_y:
-                        it = lst_y[0]
-                        p_y = float(it.get("price", {}).get("raw", 0) if isinstance(it.get("price"), dict) else (it.get("price") or 0))
-                        ts_y = int(it.get("regularMarketTime", 0) or 0)
-                        if p_y > 5000 and ts_y >= open_ts:
-                            chg_y = float(it.get("change", {}).get("raw", 0) if isinstance(it.get("change"), dict) else (it.get("change") or 0))
-                            pct_y = float(it.get("changePercent", {}).get("raw", 0) if isinstance(it.get("changePercent"), dict) else (it.get("changePercent") or 0))
-                            dt_y = datetime.datetime.fromtimestamp(ts_y, pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+                if r_ah.status_code == 200:
+                    q_ah = r_ah.json().get("RtData", {}).get("QuoteList", [])
+                    ah_rows = [
+                        q for q in q_ah
+                        if str(q.get("SymbolID", "")).strip().startswith("TXF")
+                        and ("-" not in str(q.get("SymbolID", ""))) and ("/" not in str(q.get("SymbolID", "")))
+                        and ("現貨" not in str(q.get("DispCName", "")))
+                        and str(q.get("CLastPrice", "")).replace(",", "").replace(".", "").isdigit()
+                        and float(str(q.get("CLastPrice", "0")).replace(",", "")) > 5000
+                    ]
+                    if ah_rows:
+                        q0 = ah_rows[0]
+                        c_dt = parse_roc_or_iso_date(q0.get("CDate", ""))
+                        c_tm = str(q0.get("CTime", "")).strip()
+                        tm_hhmm = int(c_tm[:4]) if (len(c_tm) >= 4 and c_tm[:4].isdigit()) else 0
+                        if (c_dt > night_open_iso) or (c_dt == night_open_iso and tm_hhmm >= 1500):
+                            n_last = float(str(q0.get("CLastPrice", "0")).replace(",", ""))
+                            n_ref_s = str(q0.get("CRefPrice", "0")).replace(",", "").strip()
+                            n_ref = float(n_ref_s) if n_ref_s.replace(".", "").isdigit() and float(n_ref_s) > 5000 else (res["tx_close"] or twii_now)
+                            n_chg = round(n_last - n_ref, 0)
+                            n_pct = round((n_chg / max(1.0, n_ref)) * 100.0, 2)
+                            tm_fmt = f"{c_tm[:2]}:{c_tm[2:4]}" if len(c_tm) >= 4 and c_tm[:4].isdigit() else c_tm
                             res["night_valid"], res["night_is_live_mis"], live_hit = True, True, True
-                            res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = round(p_y, 0), round(chg_y, 0), round(pct_y, 2)
-                            res["night_tx_time"], res["night_src"] = dt_y, "Yahoo期貨即時"
+                            res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = round(n_last, 0), n_chg, n_pct
+                            res["night_tx_time"], res["night_src"] = f"{c_dt} {tm_fmt}".strip(), "期交所MIS即時"
             except Exception:
                 pass
 
         if not live_hit:
             res["night_src"] = "夜盤交易中(雲端即時受限，改看NQ或側邊欄手動輸入)"
     else:
-        # 非夜盤交易時段（PRE_MARKET / DAY_REFLECTED / WEEKEND）：抓最新已結算 05:00 收盤結果
         night_cands = []
-        try:
-            r_ah2 = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", headers=headers, timeout=5, verify=False)
-            if r_ah2.status_code == 200 and isinstance(r_ah2.json(), list):
-                ah_o = [
-                    row for row in r_ah2.json()
-                    if str(row.get("Contract", "")).strip() == "TX"
-                    and len(str(row.get("ContractMonth(Week)", "")).strip()) == 6
-                    and ("盤後" in str(row.get("TradingSession", "")) or "After" in str(row.get("TradingSession", "")))
-                ]
-                if ah_o:
-                    ah_o.sort(key=lambda x: str(x.get("ContractMonth(Week)", "")))
-                    r0 = ah_o[0]
-                    n_last = float(str(r0.get("Last", r0.get("Close", "0"))).replace(",", "").strip() or 0)
-                    n_chg_s = str(r0.get("Change", "0")).replace(",", "").replace("+", "").strip()
-                    n_chg = float(n_chg_s) if n_chg_s not in ["", "-", "--"] else 0.0
-                    raw_pct_s = str(r0.get("%Change", r0.get("Change%", ""))).replace("%", "").replace("+", "").strip()
-                    n_pct = float(raw_pct_s) if raw_pct_s not in ["", "-", "--"] else 0.0
-                    if abs(n_pct) < 0.001 and abs(n_chg) > 0:
-                        n_pct = round((n_chg / max(1.0, n_last - n_chg)) * 100.0, 2)
-                    if n_last > 5000:
-                        f_iso = parse_roc_or_iso_date(r0.get("Date", ""))
-                        night_cands.append({"date": f_iso, "close": round(n_last, 0), "chg": round(n_chg, 0), "pct": round(n_pct, 2), "time": f"{f_iso} 05:00結算", "src": "期交所盤後結算"})
-        except Exception:
-            pass
-
         try:
             st_ah = (now_tw - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
             r_ah3 = requests.get(f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesDaily&data_id=TX&start_date={st_ah}", timeout=5, verify=False)
@@ -949,14 +887,11 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
                         night_cands.append({"date": ld_ah, "close": round(n_last, 0), "chg": round(n_chg, 0), "pct": round(n_pct, 2), "time": f"{ld_ah} 05:00結算", "src": "FinMind夜盤結算"})
         except Exception:
             pass
-
         if night_cands:
-            night_cands.sort(key=lambda x: x["date"], reverse=True)
             best_n = night_cands[0]
             res["night_valid"] = True
             res["night_tx_close"], res["night_tx_chg"], res["night_tx_chg_pct"] = best_n["close"], best_n["chg"], best_n["pct"]
             res["night_tx_time"], res["night_src"] = best_n["time"], best_n["src"]
-            # 日盤時段 (08:45~15:00) 視為已反映退出預測權重；盤前 (05:00~08:45) 僅採信最新結算
             if night_window == "DAY_REFLECTED":
                 res["night_is_stale"] = True
             elif night_window == "PRE_MARKET":
@@ -967,8 +902,7 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
 
     if not res["night_is_live_mis"]:
         nq_live = fetch_yahoo_v8_realtime("NQ=F", decimals=2)
-        if nq_live:
-            res["night_nq_chg"] = nq_live.get("chg_pct", 0.0)
+        if nq_live: res["night_nq_chg"] = nq_live.get("chg_pct", 0.0)
 
     # E. 真實大盤融資曲線
     mgn_ok = False
@@ -983,35 +917,11 @@ def fetch_auto_derivatives_and_margin_v63(twii_now: float, twii_date_iso: str):
                 scale = 1e8 if np.median(vals) > 1e10 else (1e5 if np.median(vals) > 1e6 else 1.0)
                 vals_yi = vals / scale
                 cur_yi, prev1_yi, prev2_yi, hi30_yi = float(vals_yi[-1]), float(vals_yi[-2]), float(vals_yi[-3]), float(np.max(vals_yi[-30:]))
-                res["margin_balance_yi"] = round(cur_yi, 1)
-                res["margin_chg_yi"] = round(cur_yi - prev1_yi, 1)
+                res["margin_balance_yi"], res["margin_chg_yi"] = round(cur_yi, 1), round(cur_yi - prev1_yi, 1)
                 res["margin_2d_chg_yi"] = round(cur_yi - prev2_yi, 1)
                 res["margin_2d_pct"] = round(((cur_yi - prev2_yi) / max(1.0, prev2_yi)) * 100.0, 2)
                 res["margin_30d_dd_pct"] = round(((hi30_yi - cur_yi) / max(1.0, hi30_yi)) * 100.0, 2)
                 res["margin_src"], mgn_ok = f"FinMind信用曲線({df_mm['date'].iloc[-1]})", True
     except Exception:
         pass
-
-    if not mgn_ok:
-        for d_back in range(0, 5):
-            chk_dt = now_tw - datetime.timedelta(days=d_back)
-            if chk_dt.weekday() >= 5: continue
-            try:
-                r_ms = requests.get(f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={chk_dt.strftime('%Y%m%d')}&selectType=MS&response=json", headers=headers, timeout=5, verify=False)
-                if r_ms.status_code == 200:
-                    tables = r_ms.json().get("tables", [])
-                    if tables and tables[0].get("data"):
-                        for row in tables[0]["data"]:
-                            if "融資金額" in str(row[0]):
-                                prev_k, cur_k = float(str(row[4]).replace(",", "").strip()), float(str(row[5]).replace(",", "").strip())
-                                if cur_k > 100000:
-                                    res["margin_balance_yi"] = round(cur_k / 1e5, 1)
-                                    res["margin_chg_yi"] = round((cur_k - prev_k) / 1e5, 1)
-                                    res["margin_2d_chg_yi"] = res["margin_chg_yi"]
-                                    res["margin_2d_pct"] = round(((cur_k - prev_k) / max(1.0, prev_k)) * 100.0, 2)
-                                    res["margin_src"], mgn_ok = f"證交所RWD({chk_dt.strftime('%Y-%m-%d')})", True
-                                    break
-                        if mgn_ok: break
-            except Exception:
-                continue
     return res
