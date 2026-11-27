@@ -16,13 +16,43 @@ from config_events import (
 )
 from market_feeds import (
     get_us_market_holiday_status, fetch_twse_disposition_codes, fetch_twse_notice_codes,
-    fetch_twse_exdiv_soon, fetch_dynamic_msci_data, parse_mis_price, fetch_yahoo_v8_realtime,
-    fetch_mis_realtime_batch, fetch_mis_realtime_core16, fetch_market_sector_indices,
-    fetch_market_prices_fast, fetch_us_sectors_and_leaders, classify_night_session_window,
-    fetch_auto_derivatives_and_margin_v63
+    fetch_twse_exdiv_soon, fetch_dynamic_msci_data, fetch_bond_etf_nav_and_premium,
+    parse_mis_price, fetch_yahoo_v8_realtime, fetch_mis_realtime_batch,
+    fetch_mis_realtime_core16, fetch_market_sector_indices, fetch_market_prices_fast,
+    fetch_us_sectors_and_leaders, classify_night_session_window, fetch_auto_derivatives_and_margin_v63
 )
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ==========================================
+# 共用標記工具：高當沖警戒、三率分級紅牌與上市櫃標記
+# ==========================================
+def format_day_trade_tag(ratio_pct: float, note: str = "") -> str:
+    if ratio_pct > 60.0:
+        return f"{ratio_pct:.1f}%{note} 🚨極度過熱"
+    if ratio_pct > 50.0:
+        return f"{ratio_pct:.1f}%{note} ⚠️高當沖"
+    return f"{ratio_pct:.1f}%{note}"
+
+def build_3rates_and_mkt_tags(code: str, mkt_code: str, sector: str, fin_info: dict) -> tuple[str, str, str]:
+    mkt_lbl = "(上市)" if mkt_code == "TW" else "(上櫃) ⚠️上櫃流動性控倉"
+    gm, om, nm = fin_info.get("gm", np.nan), fin_info.get("om", np.nan), fin_info.get("nm", np.nan)
+    gm_s = f"{gm:.1f}%" if pd.notna(gm) else "N/A"
+    om_s = f"{om:.1f}%" if pd.notna(om) else "N/A"
+    nm_s = f"{nm:.1f}%" if pd.notna(nm) else "N/A"
+    rates_str = f"毛{gm_s}/營{om_s}/淨{nm_s}"
+
+    m_flag = ""
+    if pd.notna(gm):
+        is_semi = any(k in sector for k in ["半導體", "晶圓", "封測", "IC設計", "矽智財", "探針"]) or code in ["2330", "3711", "2454", "2449", "6239", "3264", "3034", "2379", "3661", "3443"]
+        is_comp = any(k in sector for k in ["CCL", "PCB", "載板", "散熱", "電源", "連接器", "鏡頭", "重電", "矽光子", "零組件"]) or code in ["2308", "2301", "2383", "2368", "3017", "3324", "3653", "3533", "3008", "1519"]
+        if gm < 10.0:
+            m_flag = " ⚠️低毛利稀釋(<10%)"
+        elif is_semi and gm >= 22.0:
+            m_flag = " ✅高毛利(≧22%)"
+        elif is_comp and gm >= 20.0:
+            m_flag = " ✅高毛利(≧20%)"
+    return mkt_lbl, f"{rates_str}{m_flag}", m_flag.strip()
 
 # ==========================================
 # 1. 技術指標、四軌落底、線性維持率校準與全浮動三情境預測引擎
@@ -168,10 +198,9 @@ def compute_dynamic_pure_stock_maint(twii_now, ma10, ma20, ma60, margin_30d_dd_p
 
 def compute_dynamic_market_forecast(
     fleet: dict, radar: dict, vix_now: float, sox_chg: float, upcoming_ev_rows: list[dict],
-    fini_oi: int, fini_oi_delta: int, lots_00400a: float = 5.0, target_00400a_low: float = None,
+    fini_oi: int, fini_oi_delta: int, lots_00400a: float = 0.0, target_00400a_low: float = None,
     shares_3711_short: int = 300, fish_3711_price: float = 450.0, night_pct_override: float = None
 ) -> dict:
-    """v65.1 全浮動三情境推演引擎（日月光股數、釣魚價、00400A 退場價與夜盤 4 時段全面參數浮動）"""
     tw = float(fleet["twii_now"])
     ma5, ma10, ma20, ma60, ma240 = fleet["ma5"], fleet["ma10"], fleet["ma20"], fleet["ma60"], fleet["ma240"]
     m_ma20, m_ma36 = fleet["m_ma20"], fleet["m_ma36"]
@@ -242,11 +271,11 @@ def compute_dynamic_market_forecast(
     return {"mode_label": mode_label, "probs": {"base": p_base, "bull": p_bull, "bear": p_bear}, "paths": {"base": path_base, "bull": path_bull, "bear": path_bear}, "events_on_axis": ev_marks, "table_rows": table_rows}
 
 # ==========================================
-# 2. Layer 1 秒開主流程
+# 2. Layer 1 秒開主流程（新增 00933B / 00687B 報價、債券淨值折溢價與 OTC 背離差）
 # ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
 def download_fleet_history():
-    tickers = ["^TWII", "^GSPC", "^SOX", "^VIX", "TWD=X", "00400A.TW", "00985B.TW", "00713.TW", "00631L.TW", "3711.TW", "AVGO", "NVDA", "SGOV"]
+    tickers = ["^TWII", "^GSPC", "^SOX", "^VIX", "TWD=X", "00400A.TW", "00985B.TW", "00933B.TWO", "00687B.TWO", "00713.TW", "00631L.TW", "3711.TW", "AVGO", "NVDA", "SGOV"]
     try: return yf.download(tickers, period="5y", interval="1d", progress=False, group_by="ticker", auto_adjust=False)
     except Exception: return pd.DataFrame()
 
@@ -259,6 +288,7 @@ def fetch_and_analyze_fleet_fast():
     rt_quotes = fetch_mis_realtime_core16()
     fast_prices, twii_fmtqik, breadth_cached = fetch_market_prices_fast()
     sec_ind = fetch_market_sector_indices()
+    bond_nav = fetch_bond_etf_nav_and_premium(("00985B", "00933B", "00687B"))
     breadth = dict(breadth_cached)
     data, data_60m = download_fleet_history(), download_fleet_60m()
     now_tw = get_tw_now()
@@ -292,6 +322,8 @@ def fetch_and_analyze_fleet_fast():
     etf_metrics = {
         "00400A": {"p": 11.05, "ma10": 11.50, "ma20": 12.10, "exit_t1": 11.35, "exit_t2": 12.05, "div_latest": 0.06, "div_ttm": 0.60},
         "00985B": {"p": 10.45, "ma20": 10.35, "div_latest": 0.053, "div_ttm": 0.596},
+        "00933B": {"p": 15.85, "ma20": 15.95, "div_latest": 0.082, "div_ttm": 0.96},
+        "00687B": {"p": 28.10, "ma20": 28.40, "div_latest": 0.36, "div_ttm": 1.44},
         "00713": {"p": 61.40, "ma20": 59.50, "div_latest": 1.25, "div_ttm": 3.81},
         "00631L": {"p": 29.00, "ma5": 28.00, "ma20": 31.50},
         "3711": {"p": 511.0, "ma5": 493.6, "ma20": 510.0},
@@ -403,7 +435,7 @@ def fetch_and_analyze_fleet_fast():
                     fx_chg_ntd = round(fx_now - fx_prev, 3)
                     fx_ma5, fx_ma20 = round(float(np.mean(c_fx[-5:])), 3), round(float(np.mean(c_fx[-20:])), 3)
 
-            for sym_e, code_e in [("00400A.TW", "00400A"), ("00985B.TW", "00985B"), ("00713.TW", "00713"), ("00631L.TW", "00631L"), ("3711.TW", "3711"), ("AVGO", "AVGO"), ("NVDA", "NVDA"), ("SGOV", "SGOV")]:
+            for sym_e, code_e in [("00400A.TW", "00400A"), ("00985B.TW", "00985B"), ("00933B.TWO", "00933B"), ("00687B.TWO", "00687B"), ("00713.TW", "00713"), ("00631L.TW", "00631L"), ("3711.TW", "3711"), ("AVGO", "AVGO"), ("NVDA", "NVDA"), ("SGOV", "SGOV")]:
                 if sym_e in data:
                     df_e = data[sym_e].dropna(subset=["Close", "High", "Low"])
                     if len(df_e) >= 5:
@@ -418,7 +450,7 @@ def fetch_and_analyze_fleet_fast():
                             t1_val = round(max(p_e * 1.02, min(m10_e, p_e * 1.08)), 2)
                             t2_val = round(max(t1_val + 0.35, min(m20_e, p_e * 1.15)), 2)
                             etf_metrics["00400A"].update({"ma10": m10_e, "ma20": m20_e, "exit_t1": t1_val, "exit_t2": t2_val})
-                        elif code_e in ["00985B", "00713", "00631L", "3711"] and len(c_e) >= 20:
+                        elif code_e in ["00985B", "00933B", "00687B", "00713", "00631L", "3711"] and len(c_e) >= 20:
                             etf_metrics[code_e]["ma5"] = round(float(np.mean(c_e[-5:])), 2)
                             etf_metrics[code_e]["ma20"] = round(float(np.mean(c_e[-20:])), 2)
     except Exception:
@@ -437,8 +469,9 @@ def fetch_and_analyze_fleet_fast():
 
     rt_o00 = rt_quotes.get("o00", {})
     otc_close, otc_chg = rt_o00.get("close", 0.0), rt_o00.get("chg_pct", None)
+    otc_div = round(otc_chg - twii_chg_pct, 2) if otc_chg is not None else None
     if otc_chg is not None:
-        if twii_chg_pct >= 0.8 and otc_chg < 0.0: sec_tag = "⚠️ 拉積/權值撐盤（櫃買翻黑）"
+        if twii_chg_pct >= 0.3 and otc_chg <= -0.5: sec_tag = f"⚠️ 拉積撐盤／櫃買背離 ({otc_div:+.2f}%)"
         elif twii_chg_pct >= 0.8 and otc_chg >= 0.8: sec_tag = "🚀 權值與中小型健康普漲"
         elif otc_chg >= twii_chg_pct + 0.8: sec_tag = "🔥 內資中小型領軍強攻"
         elif twii_chg_pct <= -0.8 and otc_chg <= -0.8: sec_tag = "🚨 權值與中小型齊殺"
@@ -446,7 +479,7 @@ def fetch_and_analyze_fleet_fast():
     else:
         sec_tag = "待櫃買同步"
     sector_struct = {
-        "otc_close": otc_close, "otc_chg": otc_chg,
+        "otc_close": otc_close, "otc_chg": otc_chg, "otc_div": otc_div,
         "elec_chg": sec_ind.get("elec_chg"), "semi_chg": sec_ind.get("semi_chg"),
         "fin_chg": sec_ind.get("fin_chg"), "non_ef_chg": sec_ind.get("non_ef_chg"),
         "date_iso": sec_ind.get("date_iso", ""), "tag": sec_tag
@@ -476,11 +509,11 @@ def fetch_and_analyze_fleet_fast():
         "sp500_below_ma200": sp500_below_ma200, "sox_dd_pct": sox_dd_pct, "sox_ma240": sox_ma240,
         "breadth": breadth, "sector_struct": sector_struct, "bottom_4track": bottom_4track,
         "twii_date_iso": twii_date_iso, "date_str": date_str, "quote_src": quote_src, "vol_note": vol_note,
-        "deriv": deriv, "etf_metrics": etf_metrics, "rt_quotes": rt_quotes, "fast_prices": fast_prices
+        "deriv": deriv, "etf_metrics": etf_metrics, "bond_nav": bond_nav, "rt_quotes": rt_quotes, "fast_prices": fast_prices
     }
 
 # ==========================================
-# 3. 真實當沖率、個股資券借四位階、三率估值與按需個股掃描
+# 3. 真實當沖率、個股資券借、三率 (毛/營/淨) 與按需個股掃描
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_active_cb_codes():
@@ -597,7 +630,7 @@ def fetch_stock_margin_short_sbl_batch(codes_tuple: tuple) -> dict:
                 if not match_p.empty and dt_v > 0:
                     tot_v = float(match_p["Trading_Volume"].iloc[-1] or 0)
                     if tot_v > 0 and 0.0 < (dt_v / tot_v) * 100.0 <= 99.9:
-                        info["exact_dt_str"] = f"{(dt_v / tot_v) * 100.0:.1f}%({ld_dt[5:]})"
+                        info["exact_dt_str"] = format_day_trade_tag(round((dt_v / tot_v) * 100.0, 1), f"({ld_dt[5:]})")
         except Exception:
             pass
         return code, info
@@ -608,6 +641,7 @@ def fetch_stock_margin_short_sbl_batch(codes_tuple: tuple) -> dict:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_official_3rates_and_cum_eps():
+    """v65.2 強化：同步抓取最新單季 毛利率 (gm)、營益率 (om)、淨利率 (nm) 與累計 EPS"""
     headers, fin_dict = {"User-Agent": "Mozilla/5.0"}, {}
     def clean_num(val):
         try:
@@ -621,7 +655,12 @@ def fetch_official_3rates_and_cum_eps():
                 for row in r.json():
                     c = str(row.get("公司代號", row.get("證券代號", ""))).strip()
                     if len(c) == 4 and c.isdigit():
-                        fin_dict[c] = {"gm": clean_num(next((v for k, v in row.items() if "毛利率" in k), np.nan)), "om": clean_num(next((v for k, v in row.items() if "營業利益率" in k or "營益率" in k), np.nan)), "cum_eps": np.nan}
+                        fin_dict[c] = {
+                            "gm": clean_num(next((v for k, v in row.items() if "毛利率" in k), np.nan)),
+                            "om": clean_num(next((v for k, v in row.items() if "營業利益率" in k or "營益率" in k), np.nan)),
+                            "nm": clean_num(next((v for k, v in row.items() if "稅後純益率" in k or "淨利率" in k or "純益率" in k), np.nan)),
+                            "cum_eps": np.nan
+                        }
         except Exception: continue
     for url in ["https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap06_O_ci"]:
         try:
@@ -631,7 +670,7 @@ def fetch_official_3rates_and_cum_eps():
                     c = str(row.get("公司代號", row.get("證券代號", ""))).strip()
                     if len(c) == 4 and c.isdigit():
                         eps_v = clean_num(next((v for k, v in row.items() if "基本每股盈餘" in k or "每股盈餘" in k), np.nan))
-                        if c not in fin_dict: fin_dict[c] = {"gm": np.nan, "om": np.nan, "cum_eps": eps_v}
+                        if c not in fin_dict: fin_dict[c] = {"gm": np.nan, "om": np.nan, "nm": np.nan, "cum_eps": eps_v}
                         else: fin_dict[c]["cum_eps"] = eps_v
         except Exception: continue
     return fin_dict
@@ -647,7 +686,7 @@ def fetch_full_market_enrichment():
         for code, dt_sh in dt_map.items():
             if code in price_dict and float(price_dict[code].get("vol_shares", 0)) > 0 and dt_sh > 0:
                 ratio_dt = round((dt_sh / float(price_dict[code]["vol_shares"])) * 100.0, 1)
-                if 0.1 <= ratio_dt <= 99.5: price_dict[code]["day_trade_str"] = f"{ratio_dt:.1f}%{dt_note}"
+                if 0.1 <= ratio_dt <= 99.5: price_dict[code]["day_trade_str"] = format_day_trade_tag(ratio_dt, dt_note)
     except Exception: pass
 
     for d_back in range(0, 5):
@@ -767,7 +806,7 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
     M = 1.20 if r6 >= 35 else (1.14 if r6 >= 20 else (1.08 if r6 >= 10 else (1.02 if r6 >= 0 else (0.94 if r6 >= -10 else 0.88))))
     f_info = fetch_official_3rates_and_cum_eps().get(code, {})
     gm_v, om_v, cum_eps_api = f_info.get("gm", np.nan), f_info.get("om", np.nan), f_info.get("cum_eps", np.nan)
-    if code in MARGIN_DILUTION_SET or (r6 > 10 and pd.notna(om_v) and om_v < 4.2 and not is_fin): T, tb = 0.88, "⚠️毛利稀釋T=0.88"
+    if code in MARGIN_DILUTION_SET or (pd.notna(gm_v) and gm_v < 10.0 and not is_fin) or (r6 > 10 and pd.notna(om_v) and om_v < 4.2 and not is_fin): T, tb = 0.88, "⚠️毛利稀釋T=0.88"
     elif code in MARGIN_EXPANSION_SET or (pd.notna(gm_v) and pd.notna(om_v) and gm_v >= 28 and om_v >= 15 and s_yoy >= c_yoy and s_yoy >= 15): T, tb = 1.12, "🔥三率三升T=1.12"
     else: T, tb = 1.00, "⚖️三率持平T=1.00"
     W = 0.78 if is_fin else 0.74
@@ -786,30 +825,54 @@ def compute_eps_valuation(code, curr_p, sector_str, single_yoy, cum_yoy, pe_offi
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_single_stock_anti_trap(code: str, mkt: str = "TW") -> dict:
-    if code in ODM_Q3_OFFICIAL_BASE:
-        b = dict(ODM_Q3_OFFICIAL_BASE[code]); b["ok"] = True; return b
-    out = {"ok": False, "inv_qoq": None, "ar_qoq": None, "ocf_positive": None, "note": "N/A (交由淘金客聯網查核)"}
+    """v65.2 強化：季報防墊料（存貨 QoQ >= 20% 標警戒）＋ 多季「三率三升（季增/年增）」自動驗算"""
+    base_res = dict(ODM_Q3_OFFICIAL_BASE[code]) if code in ODM_Q3_OFFICIAL_BASE else {"ok": False, "inv_qoq": None, "ar_qoq": None, "ocf_positive": None, "note": "N/A (交由淘金客聯網查核)"}
+    if code in ODM_Q3_OFFICIAL_BASE: base_res["ok"] = True
+    base_res["rates_trend"] = ""
     try:
         tkr = yf.Ticker(f"{code}.{'TW' if mkt == 'TW' else 'TWO'}")
-        bs, cf = tkr.quarterly_balance_sheet, tkr.quarterly_cashflow
-        inv_q, ar_q, ocf_p = None, None, None
-        if bs is not None and not bs.empty and bs.shape[1] >= 2:
-            ir = next((i for i in bs.index if "Inventory" in str(i) or "Inventories" in str(i)), None)
-            if ir is not None and pd.notna(bs.loc[ir].iloc[0]) and pd.notna(bs.loc[ir].iloc[1]) and float(bs.loc[ir].iloc[1]) > 0:
-                inv_q = round(((float(bs.loc[ir].iloc[0]) - float(bs.loc[ir].iloc[1])) / float(bs.loc[ir].iloc[1])) * 100.0, 1)
-            ar = next((i for i in bs.index if "Accounts Receivable" in str(i) or "Receivables" in str(i)), None)
-            if ar is not None and pd.notna(bs.loc[ar].iloc[0]) and pd.notna(bs.loc[ar].iloc[1]) and float(bs.loc[ar].iloc[1]) > 0:
-                ar_q = round(((float(bs.loc[ar].iloc[0]) - float(bs.loc[ar].iloc[1])) / float(bs.loc[ar].iloc[1])) * 100.0, 1)
-        if cf is not None and not cf.empty and cf.shape[1] >= 1:
-            orw = next((i for i in cf.index if "Operating Cash Flow" in str(i) or "Cash Flow From Continuing Operating" in str(i)), None)
-            if orw is not None and pd.notna(cf.loc[orw].iloc[0]): ocf_p = bool(float(cf.loc[orw].iloc[0]) > 0)
-        if any(x is not None for x in [inv_q, ar_q, ocf_p]):
-            i_s = f"存貨QoQ {inv_q:+.1f}%" if inv_q is not None else "存貨QoQ N/A"
-            a_s = f"應收QoQ {ar_q:+.1f}%" if ar_q is not None else "應收QoQ N/A"
-            o_s = ("營業現金流為正(✅)" if ocf_p else "營業現金流為負(⚠️)") if ocf_p is not None else "OCF N/A"
-            out = {"ok": True, "inv_qoq": inv_q, "ar_qoq": ar_q, "ocf_positive": ocf_p, "note": f"{i_s} / {a_s} / {o_s}"}
-    except Exception: pass
-    return out
+        if not base_res.get("ok"):
+            bs, cf = tkr.quarterly_balance_sheet, tkr.quarterly_cashflow
+            inv_q, ar_q, ocf_p = None, None, None
+            if bs is not None and not bs.empty and bs.shape[1] >= 2:
+                ir = next((i for i in bs.index if "Inventory" in str(i) or "Inventories" in str(i)), None)
+                if ir is not None and pd.notna(bs.loc[ir].iloc[0]) and pd.notna(bs.loc[ir].iloc[1]) and float(bs.loc[ir].iloc[1]) > 0:
+                    inv_q = round(((float(bs.loc[ir].iloc[0]) - float(bs.loc[ir].iloc[1])) / float(bs.loc[ir].iloc[1])) * 100.0, 1)
+                ar = next((i for i in bs.index if "Accounts Receivable" in str(i) or "Receivables" in str(i)), None)
+                if ar is not None and pd.notna(bs.loc[ar].iloc[0]) and pd.notna(bs.loc[ar].iloc[1]) and float(bs.loc[ar].iloc[1]) > 0:
+                    ar_q = round(((float(bs.loc[ar].iloc[0]) - float(bs.loc[ar].iloc[1])) / float(bs.loc[ar].iloc[1])) * 100.0, 1)
+            if cf is not None and not cf.empty and cf.shape[1] >= 1:
+                orw = next((i for i in cf.index if "Operating Cash Flow" in str(i) or "Cash Flow From Continuing Operating" in str(i)), None)
+                if orw is not None and pd.notna(cf.loc[orw].iloc[0]): ocf_p = bool(float(cf.loc[orw].iloc[0]) > 0)
+            if any(x is not None for x in [inv_q, ar_q, ocf_p]):
+                inv_warn = " ⚠️防墊料警戒" if (inv_q is not None and inv_q >= 20.0) else ""
+                i_s = f"存貨QoQ {inv_q:+.1f}%{inv_warn}" if inv_q is not None else "存貨QoQ N/A"
+                a_s = f"應收QoQ {ar_q:+.1f}%" if ar_q is not None else "應收QoQ N/A"
+                o_s = ("營業現金流為正(✅)" if ocf_p else "營業現金流為負(⚠️)") if ocf_p is not None else "OCF N/A"
+                base_res.update({"ok": True, "inv_qoq": inv_q, "ar_qoq": ar_q, "ocf_positive": ocf_p, "note": f"{i_s} / {a_s} / {o_s}"})
+
+        # 多季三率三升（季增 / 年增）自動比對
+        inc = tkr.quarterly_income_stmt
+        if inc is not None and not inc.empty and inc.shape[1] >= 2:
+            def _find_r(keys):
+                return next((i for i in inc.index if any(k in str(i) for k in keys)), None)
+            r_rev, r_gp, r_op, r_ni = _find_r(["Total Revenue", "Operating Revenue"]), _find_r(["Gross Profit"]), _find_r(["Operating Income", "EBIT"]), _find_r(["Net Income"])
+            if all(x is not None for x in [r_rev, r_gp, r_op, r_ni]):
+                def _q_rates(col_i):
+                    rv = float(inc.loc[r_rev].iloc[col_i])
+                    if pd.isna(rv) or rv <= 0: return None
+                    return (float(inc.loc[r_gp].iloc[col_i]) / rv * 100.0, float(inc.loc[r_op].iloc[col_i]) / rv * 100.0, float(inc.loc[r_ni].iloc[col_i]) / rv * 100.0)
+                q0, q1 = _q_rates(0), _q_rates(1)
+                q4 = _q_rates(4) if inc.shape[1] >= 5 else None
+                tags = []
+                if q0 and q1 and all(pd.notna(x) for x in q0 + q1):
+                    if q0[0] > q1[0] and q0[1] > q1[1] and q0[2] > q1[2]: tags.append("🔥季增三率三升")
+                if q0 and q4 and all(pd.notna(x) for x in q0 + q4):
+                    if q0[0] > q4[0] and q0[1] > q4[1] and q0[2] > q4[2]: tags.append("🔥年增三率三升")
+                if tags: base_res["rates_trend"] = "＋".join(tags)
+    except Exception:
+        pass
+    return base_res
 
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_tdcc_weekly_delta_ondemand(codes_tuple: tuple) -> dict:
@@ -856,6 +919,7 @@ def fetch_ondemand_stocks_detail(codes_tuple: tuple, twii_20d_ret: float, macro_
     codes = [c for c in list(codes_tuple)[:6] if len(str(c)) == 4 and str(c).isdigit()]
     if not codes: return {}
     price_dict, tdcc_dict, rev_dict = fetch_full_market_enrichment()
+    fin_3rates_all = fetch_official_3rates_and_cum_eps()
     disp_map, notice_set, exdiv_map, cb_set = fetch_twse_disposition_codes(), fetch_twse_notice_codes(), fetch_twse_exdiv_soon(5), fetch_active_cb_codes()
     vol_mult, _ = get_volume_multiplier()
     now_tw = get_tw_now()
@@ -917,6 +981,7 @@ def fetch_ondemand_stocks_detail(codes_tuple: tuple, twii_20d_ret: float, macro_
             p_meta = price_dict.get(code, {})
             name = p_meta.get("name") or CORE_WATCHLIST.get(code, (code, "", mkt_code))[0]
             sector = p_meta.get("sector") or CORE_WATCHLIST.get(code, (code, "電子/一般", mkt_code))[1]
+            mkt_lbl, rates_str, _ = build_3rates_and_mkt_tags(code, mkt_code, sector, fin_3rates_all.get(code, {}))
             obv_t, _ = compute_obv_trend(c[-60:], v[-60:])
             rs20_s = f"{round(((curr_p - float(c[-21])) / float(c[-21])) * 100.0 - twii_20d_ret, 1):+.1f}%" if (len(c) >= 21 and c[-21] > 0) else "N/A"
             t400, t1000, d400, d1000 = tdcc_dict.get(code), p_meta.get("tdcc_1000"), p_meta.get("tdcc_400_delta"), p_meta.get("tdcc_1000_delta")
@@ -931,8 +996,8 @@ def fetch_ondemand_stocks_detail(codes_tuple: tuple, twii_20d_ret: float, macro_
             g_tag, _, g_short = evaluate_granary_and_anti_trap(code, yoy_v, macro_withdrawal_alert)
             est_e, pe_d, ep_in, ep_tg, v_diag = compute_eps_valuation(code, curr_p, sector, yoy_v, cum_v, pe_o, iron_p)
             out[code] = {
-                "代碼": code, "股名": name, "_raw_name": name, "_mkt": mkt_code, "族群": sector,
-                "穀倉賽道與防墊料": g_tag, "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d,
+                "代碼": code, "股名": name, "市場別": mkt_lbl, "_raw_name": name, "_mkt": mkt_code, "族群": sector,
+                "三率(毛/營/淨)": rates_str, "穀倉賽道與防墊料": g_tag, "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d,
                 "短線屬性": f"按需快檢｜{g_short}", "_pattern_tag": f"按需快檢｜{g_short}",
                 "DMI方向雙檢": dmi_str, "日J值": sj, "20MA扣抵": deduct_20ma_str, "BIAS10": b10_s, "BIAS20": b20_s,
                 "5MA量比": vol_ratio, "上影線%": up_sh_p, "收盤位階": cp_s, "當沖率": p_meta.get("day_trade_str", "N/A"),
@@ -955,6 +1020,7 @@ def download_historical_klines(yf_tickers_tuple):
 
 def scan_all_stocks_on_demand(twii_20d_ret: float, macro_withdrawal_alert: bool):
     price_dict, tdcc_dict, rev_dict = fetch_full_market_enrichment()
+    fin_3rates_all = fetch_official_3rates_and_cum_eps()
     msci_data = fetch_dynamic_msci_data(len(price_dict))
     notice_set, exdiv_map, cb_set = fetch_twse_notice_codes(), fetch_twse_exdiv_soon(5), fetch_active_cb_codes()
     vol_mult, vol_note = get_volume_multiplier()
@@ -1008,6 +1074,7 @@ def scan_all_stocks_on_demand(twii_20d_ret: float, macro_withdrawal_alert: bool)
             if (code not in CORE_WATCHLIST) and (code not in msci_code_role) and is_zombie_stock_tiered(code, curr_p, est_vol, ma5_vol): continue
 
             p_meta = price_dict.get(code, {})
+            mkt_lbl, rates_str, _ = build_3rates_and_mkt_tags(code, mkt_code, sector, fin_3rates_all.get(code, {}))
             sec_recs.append({"code": code, "name": name, "sector": sector, "official_sec": p_meta.get("sector") or sector, "close": curr_p, "chg_1d": chg_1d, "est_vol": est_vol, "yest_vol": yest_vol, "yod_ratio": yod_ratio})
             ma5, ma10, ma20 = round(float(np.mean(c[-5:])), 2), round(float(np.mean(c[-10:])), 2), round(float(np.mean(c[-20:])), 2)
             ma60 = round(float(np.mean(c[-60:])), 2) if len(c) >= 60 else ma20
@@ -1058,7 +1125,8 @@ def scan_all_stocks_on_demand(twii_20d_ret: float, macro_withdrawal_alert: bool)
             risk_badges = (" 🚨[處置]" if code in disp_map else (" 👀[注意]" if code in notice_set else "")) + (f" 📅[{exdiv_map[code]}]" if code in exdiv_map else "") + (" 🔥[CB]" if code in cb_set else "") + (" ⚠️量縮" if is_zombie_stock_tiered(code, curr_p, est_vol, ma5_vol) else "")
 
             row_base = {
-                "代碼": code, "股名": f"{name}{risk_badges}", "族群": sector, "穀倉賽道與防墊料": g_tag, "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d, "短線屬性": st_tag,
+                "代碼": code, "股名": f"{name}{risk_badges}", "市場別": mkt_lbl, "族群": sector, "三率(毛/營/淨)": rates_str,
+                "穀倉賽道與防墊料": g_tag, "現價": curr_p, "今日%": chg_1d, "3日%": chg_3d, "短線屬性": st_tag,
                 "DMI方向雙檢": dmi_str, "日J值": sj, "20MA扣抵": deduct_20ma_str, "BIAS10": b10_s, "BIAS20": b20_s, "5MA量比": vol_ratio, "上影線%": up_sh_p, "收盤位階": cp_s, "當沖率": dt_s,
                 "OBV趨勢": obv_t, "RS20D%": rs20_s, "大戶400/千張": tdcc_s, "ATR%波動尺": atr_s, "法人動向": format_inst_chip_tag(fl, sl), "外資買賣(張)": fl, "投信買賣(張)": sl,
                 "預估EPS(元)": est_e, "本益比(PE)": pe_d, "💎EPS合理切入價": ep_in, "🎯EPS目標價": ep_tg, "估值診斷": v_diag,
